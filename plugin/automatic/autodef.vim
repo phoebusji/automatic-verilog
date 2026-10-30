@@ -1364,7 +1364,7 @@ endfunction
 "    0     1            2      3             4            5         6
 "   [seqs, signal_name, lines, module_names, conn_widths, resolved, stype]
 "---------------------------------------------------
-function s:GetiWire(lines,files,modules,reg_width_names,decl_reg,io_names)
+function s:GetiWire(lines,files,modules,reg_width_names,decl_reg,io_names,reg_width_hints)
     let width_names = {}
 
     "Get current module io
@@ -1507,6 +1507,24 @@ function s:GetiWire(lines,files,modules,reg_width_names,decl_reg,io_names)
                     else
                         let wire_status = -1
                         echohl ErrorMsg | echo "Error when get ".port." from ".module_name| echohl None
+                    endif
+
+                    "Record child-port width hints for inferred registers.
+                    "Only direct whole-signal connections provide hints; a
+                    "part-select such as data[3:0] does not describe the whole
+                    "top-level signal width.
+                    if has_key(inst_io_names,port)
+                                \ && conn =~ '^\s*\h\w*\s*$'
+                                \ && (has_key(a:reg_width_names,conn_name)
+                                \     || index(a:decl_reg,conn_name) != -1)
+                        let child_port_width = ''
+                        if value[3] !=# 'c0' && value[4] !=# 'c0'
+                            let child_port_width = '['.value[3].':'.value[4].']'
+                        endif
+                        if !has_key(a:reg_width_hints,conn_name)
+                            call extend(a:reg_width_hints,{conn_name : []})
+                        endif
+                        call add(a:reg_width_hints[conn_name],child_port_width)
                     endif
 
                     "if it's reg, it can't be wire
@@ -2993,6 +3011,12 @@ function s:GetAllSig(lines,mode)
 "    "}}}3
 
     if a:mode == 'reg'
+        " AUTOREG candidates may also be connected to child-module ports.
+        " Collect their width hints before returning the register candidates.
+        let [files,modules] = g:AutoVerilog_GetModuleFileDirDic()
+        let reg_width_hints = {}
+        call s:GetiWire(a:lines,files,modules,reg_width_names,decl_reg,io_names,reg_width_hints)
+        let reg_names = s:AutoDefApplyRegWidthHints(reg_names,reg_width_hints)
         return reg_names
     endif
 
@@ -3085,7 +3109,16 @@ function s:GetAllSig(lines,mode)
 
     "Get iwire
     "remove io, declared register and register from them
-    let iwire_width_names = s:GetiWire(a:lines,files,modules,reg_width_names,decl_reg,io_names)
+    let reg_width_hints = {}
+    let iwire_width_names = s:GetiWire(a:lines,files,modules,reg_width_names,decl_reg,io_names,reg_width_hints)
+
+    " Prefer child-port widths for inferred registers as well as wires.
+    let reg_names = s:AutoDefApplyRegWidthHints(reg_names,reg_width_hints)
+    for name in keys(reg_names)
+        if has_key(sig_names,name)
+            let sig_names[name] = reg_names[name]
+        endif
+    endfor
     "}}}3
 
 "    "print awire test {{{3
@@ -3134,22 +3167,24 @@ function s:GetAllSig(lines,mode)
             "use iwire
             else
                 let conn_widths = iwire_value[4]
+                let conn_width = s:AutoDefSelectPreferredWidth(conn_widths)
                 let stype = iwire_value[6]
                 "   list of signal sequences
                 "    0     1             2      3            4         5
                 "   [type, specify type, width, signal_name, resolved, seq]
-                let value = ['wire',stype,conn_widths[-1],name,0,iwire_seqs[0]]
+                let value = ['wire',stype,conn_width,name,0,iwire_seqs[0]]
                 call extend(sig_names,{name : value})
                 call extend(wire_names,{name : value})
             endif
         "only iwire
         else
             let conn_widths = iwire_value[4]
+            let conn_width = s:AutoDefSelectPreferredWidth(conn_widths)
             let stype = iwire_value[6]
             "   list of signal sequences
             "    0     1             2      3            4         5
             "   [type, specify type, width, signal_name, resolved, seq]
-            let value = ['wire',stype,conn_widths[-1],name,iwire_resolved,iwire_seqs[0]]
+            let value = ['wire',stype,conn_width,name,iwire_resolved,iwire_seqs[0]]
             call extend(sig_names,{name : value})
             call extend(wire_names,{name : value})
         endif
@@ -3336,3 +3371,81 @@ let &cpo=s:cpo
 unlet s:cpo
 "}}}1
 
+
+"-----------------------------------------------------------------------------
+" Select the preferred signal width when multiple module ports connect to the
+" same top-level signal.
+"
+" Priority:
+"   3: macro-based width, e.g. [`WIDTH-1:0]
+"   2: numeric width,      e.g. [7:0]; choose the largest bit count
+"   1: parameter width,    e.g. [BIT_WIDTH-1:0]
+"   0: scalar/empty width
+"
+" Equal-priority symbolic widths keep their first occurrence.
+"-----------------------------------------------------------------------------
+function! s:AutoDefSelectPreferredWidth(widths) abort
+    let l:best_width = ''
+    let l:best_rank = -1
+    let l:best_bits = -1
+
+    for l:width in a:widths
+        let l:info = s:AutoDefGetWidthPriority(l:width)
+
+        if l:info.rank > l:best_rank
+            let l:best_width = l:width
+            let l:best_rank = l:info.rank
+            let l:best_bits = l:info.bits
+        elseif l:info.rank == 2 && l:best_rank == 2
+                    \ && l:info.bits > l:best_bits
+            let l:best_width = l:width
+            let l:best_bits = l:info.bits
+        endif
+    endfor
+
+    return l:best_width
+endfunction
+
+
+function! s:AutoDefApplyRegWidthHints(reg_names,hints) abort
+    let l:result = copy(a:reg_names)
+    for l:name in keys(a:hints)
+        if !has_key(l:result,l:name) || empty(a:hints[l:name])
+            continue
+        endif
+        let l:value = copy(l:result[l:name])
+        let l:value[2] = s:AutoDefSelectPreferredWidth(a:hints[l:name])
+        let l:result[l:name] = l:value
+    endfor
+    return l:result
+endfunction
+
+function! s:AutoDefGetWidthPriority(width) abort
+    let l:width = substitute(a:width, '\s', '', 'g')
+
+    if empty(l:width)
+        return {'rank': 2, 'bits': 1}
+    endif
+
+    " Macro-based range: highest priority.
+    if stridx(l:width, '`') >= 0
+        return {'rank': 3, 'bits': 0}
+    endif
+
+    " Numeric packed range, e.g. [7:0] or [0:7].
+    let l:range = matchlist(l:width, '^\[\(\d\+\):\(\d\+\)\]$')
+    if !empty(l:range)
+        let l:upper = str2nr(l:range[1])
+        let l:lower = str2nr(l:range[2])
+        return {'rank': 2, 'bits': abs(l:upper - l:lower) + 1}
+    endif
+
+    " Numeric single bit select.
+    let l:single = matchlist(l:width, '^\[\d\+\]$')
+    if !empty(l:single)
+        return {'rank': 2, 'bits': 1}
+    endif
+
+    " Symbolic non-macro expressions are treated as parameter widths.
+    return {'rank': 1, 'bits': 0}
+endfunction

@@ -1,5 +1,5 @@
 "-----------------------------------------------------------------------------
-" Vim Plugin for Verilog Code Automactic Generation 
+" Vim Plugin for Verilog Code Automactic Generation
 " Author:         HonkW
 " Website:        https://honk.wang
 " Last Modified:  2023/08/03 18:12
@@ -140,8 +140,8 @@ let g:_ATV_AUTOINST_DEFAULTS = {
             \'style':     0,
             \'ls_cnt':      0,
             \'rs_cnt':      0,
-            \'tail_nalign': 0,    
-            \'add_dir':     0,    
+            \'tail_nalign': 0,
+            \'add_dir':     0,
             \'add_dir_keep':0,
             \'tcmt_delim':  ' //',
             \'io_dir':      1,
@@ -151,12 +151,12 @@ let g:_ATV_AUTOINST_DEFAULTS = {
             \'inst_tstp_fmt':"%Y.%m.%d %H:%M",
             \'inst_del':    1,
             \'usr_cmnt':    0,
-            \'keep_chg':    1,        
-            \'keep_name':   1,        
+            \'keep_chg':    1,
+            \'keep_name':   1,
             \'incl_cmnt':   1,
-            \'incl_ifdef':  1,    
-            \'95_support':  0,    
-            \'itf_support': 0,    
+            \'incl_ifdef':  1,
+            \'95_support':  0,
+            \'itf_support': 0,
             \'incl_width':  1
             \}
 for s:key in keys(g:_ATV_AUTOINST_DEFAULTS)
@@ -173,7 +173,7 @@ if g:atv_autoinst_keep_chg == 0
     let g:atv_autoinst_keep_name = 0
 endif
 
-if g:atv_autoinst_tail_nalign == 0 
+if g:atv_autoinst_tail_nalign == 0
     let g:atv_autoinst_rs_cnt = 0
 endif
 
@@ -193,7 +193,7 @@ endif
 "AutoInst 自动例化{{{1
 "--------------------------------------------------
 " Function: AutoInst
-" Input: 
+" Input:
 "   mode : mode for autoinst
 " Description:
 "   autoinst for inst module
@@ -205,7 +205,7 @@ endif
 "   list of port sequences
 "            0     1         2       3       4       5            6          7     8      9
 "   value = [type, sequence, io_dir, width1, width2, signal_name, last_port, line, width, first_port ]
-"
+
 "   io_seqs = {seq : value }
 "   io_names = {signal_name : value }
 "---------------------------------------------------
@@ -241,7 +241,7 @@ function! g:AutoInst(mode)
         "Get module_name & inst_name
         let [module_name,inst_name,idx1,idx2,idx3] = g:AutoVerilog_GetInstModuleName()
 
-        "Get keep inst io & update inst io list 
+        "Get keep inst io & update inst io list
         let keep_io_list = s:GetInstIO(getline(idx1,line('.')))
         let upd_io_list = s:GetInstIO(getline(line('.'),idx2))
         let chg_lines = getline(line('.'),idx2)
@@ -286,7 +286,7 @@ function! g:AutoInst(mode)
 
         "Remove io from io_seqs that want to be keep when autoinst
         "   value = [type, sequence, io_dir, width1, width2, signal_name, last_port, line, width, first_port ]
-        "   io_seqs = {sequence : value }
+        "   io_seqs = {seq : value }
         "   io_names = {signal_name : value }
         for name in keep_io_list
             if has_key(io_names,name)
@@ -311,6 +311,7 @@ function! g:AutoInst(mode)
         "Delete current line );
         let line = substitute(getline(line('.')),')\s*;','','')
         call setline(line('.'),line)
+
         "Append io port and );
         call add(lines,s:st_prefix.');')
         call append(line('.'),lines)
@@ -349,7 +350,7 @@ endfunction
 "KillAutoInst Kill自动例化{{{1
 "--------------------------------------------------
 " Function: KillAutoInst
-" Input: 
+" Input:
 "   mode : mode for kill autoinst
 " Description:
 "   autoinst for inst module
@@ -408,7 +409,7 @@ endfunction
 "AutoVerilog_GetIO 获取输入输出端口{{{2
 "--------------------------------------------------
 " Function: AutoVerilog_GetIO
-" Input: 
+" Input:
 "   lines : all lines to get IO port
 "   mode : different use of keys
 "          seq -> use seq as key
@@ -417,7 +418,7 @@ endfunction
 "   Get io port info from declaration
 "   e.g
 "   module_name #(
-"       parameter A = 16 
+"       parameter A = 16
 "       parameter B = 4'd11
 "       parameter C = 16'h55
 "   )
@@ -499,6 +500,7 @@ function g:AutoVerilog_GetIO(lines,mode)
                 let value = ['keep',seq,     '',     'c0',   'c0',   'NULL',       0,         '',   '',    '']
                 call extend(io_seqs, {seq : value})
                 let seq = seq + 1
+
             "}}}4
 
             " `ifdef `ifndef & single comment line {{{5
@@ -507,17 +509,22 @@ function g:AutoVerilog_GetIO(lines,mode)
                 let value = ['keep',seq,     '',     'c0',   'c0',    line,        0,         line, '',    '']
                 call extend(io_seqs, {seq : value})
                 let seq = seq + 1
+
             "}}}5
             "}}}4
-            
+
             "input/output/inout ports{{{4
             elseif line =~ '^\s*'. s:VlogTypePorts || line =~ '^\s*(\s*'.s:VlogTypePorts || line =~ '^\s*,\s*'.s:VlogTypePorts
                 let wait_port = 0
+
+                "Remove trailing // comments before parsing port names.
+                if line =~ '\/\/.*$'
+                    let line = substitute(line,'\/\/.*$','','')
+                endif
+
                 "delete abnormal
                 if line =~ '\<signed\>\|\<unsigned\>'
                     let line = substitute(line,'\<signed\>\|\<unsigned\>','','')
-                elseif line =~ '\/\/.*$'
-                    let line = substitute(line,'\/\/.*$','','')
                 endif
 
                 "type reg/wire
@@ -536,10 +543,10 @@ function g:AutoVerilog_GetIO(lines,mode)
                 let io_dir = matchstr(line,s:VlogTypePorts)
 
                 "width
-                let width = matchstr(line,'\[.\{-\}\]')                 
+                let width = matchstr(line,'\[.\{-\}\]')
                 let width = substitute(width,'\s*','','g')          "delete redundant space
-                let width1 = matchstr(width,'\v\[\zs\S+\ze:.*\]')   
-                let width2 = matchstr(width,'\v\[.*:\zs\S+\ze\]')   
+                let width1 = matchstr(width,'\v\[\zs\S+\ze:.*\]')
+                let width2 = matchstr(width,'\v\[.*:\zs\S+\ze\]')
 
                 if width == ''
                     let width1 = 'c0'
@@ -573,7 +580,7 @@ function g:AutoVerilog_GetIO(lines,mode)
                 if g:atv_autoinst_incl_width == 0       "if config,never output width
                     let width = ''
                 elseif width2 == 'c0'
-                    if width1 == 'c0' 
+                    if width1 == 'c0'
                         let width = ''
                     else
                         let width = '['.width1.']'
@@ -599,8 +606,8 @@ function g:AutoVerilog_GetIO(lines,mode)
             "}}}4
 
             "sv interface {{{4
-            elseif (line =~ '^\s*'    . s:not_keywords_pattern.'\.\='.'\w*'.'\s\+'.'\w\+' 
-              \ || line =~ '^\s*(\s*'. s:not_keywords_pattern.'\.\='.'\w*'.'\s\+'.'\w\+' 
+            elseif (line =~ '^\s*'    . s:not_keywords_pattern.'\.\='.'\w*'.'\s\+'.'\w\+'
+              \ || line =~ '^\s*(\s*'. s:not_keywords_pattern.'\.\='.'\w*'.'\s\+'.'\w\+'
               \ || line =~ '^\s*,\s*'. s:not_keywords_pattern.'\.\='.'\w*'.'\s\+'.'\w\+')
               \ && g:atv_autoinst_itf_support == 1
 
@@ -639,7 +646,7 @@ function g:AutoVerilog_GetIO(lines,mode)
                 endif
                 break
             endif
-            
+
             if line =~ ')\s*;\s*$' "find end of port declaration
                 let interface_flag = 0     "break all interface
                 "verilog-1995,input/output/inout may appear outside bracket
@@ -736,7 +743,7 @@ endfunction
 "GetInstIO 获取例化端口{{{2
 "--------------------------------------------------
 " Function: GetInstIO
-" Input: 
+" Input:
 "   lines : lines to get inst IO port
 " Description:
 "   Get inst io port info from lines
@@ -797,7 +804,7 @@ endfunction
 "GetChangedInstIO 获取修改过的例化端口{{{2
 "--------------------------------------------------
 " Function: GetChangedInstIO
-" Input: 
+" Input:
 "   lines : lines to get inst IO port
 "   io_names = {signal_name : value }
 " Description:
@@ -856,7 +863,7 @@ function s:GetChangedInstIO(lines,io_names)
             elseif has_key(io_names,inst_name)
                 let value = io_names[inst_name]
                 let type = value[0]
-                if type != 'keep' 
+                if type != 'keep'
                     let name = value[5]
                     let width = value[8]
                     let conn_inst = name.width
@@ -877,7 +884,7 @@ endfunction
 "AutoVerilog_GetInstModuleName 获取例化名和模块名{{{2
 "--------------------------------------------------
 " Function: AutoVerilog_GetInstModuleName
-" Input: 
+" Input:
 "   Must put cursor to /*autoinst*/ position
 " Description:
 " e.g
@@ -933,7 +940,7 @@ function g:AutoVerilog_GetInstModuleName()
             call substitute(line,'(','\=add(left_simicolon_list,submatch(0))','g')
 
             "find position of '('
-            "in case of problem like 
+            "in case of problem like
             "   Register #(.WIDTH(32), .INIT(EXC_Vector_Base_Reset)) PC (
             "must get all column number of '('
             let col_match = line
@@ -955,7 +962,7 @@ function g:AutoVerilog_GetInstModuleName()
                     echohl ErrorMsg | echo "() pair not-match in autoinst, line: ".index." colunm: ".col | echohl None
                     return
                 else
-                    "searchpair() may err pair when 
+                    "searchpair() may err pair when
                     "( ..... //)
                     ")
                     "exist
@@ -1115,31 +1122,31 @@ endfunction
 "KillAutoInst 删除所有输入输出端口例化{{{2
 "--------------------------------------------------
 " Function: KillAutoInst
-" Input: 
+" Input:
 "   Must put cursor to /*autoinst*/ position
 " Description:
 " e.g kill all declaration after /*autoinst*/
-"    
+"
 "   module_name
 "   inst_name
-"   (   
+"   (
 "       .clk        (clk),      //input
 "       /*autoinst*/
 "       .port_b     (port_b)    //output
 "   );
-"   
+"
 "   --------------> after KillAutoInst
 "
 "   module_name
 "   inst_name
-"   (   
+"   (
 "       .clk        (clk),      //input
 "       /*autoinst*/);
 "
 " Output:
 "   line after kill
 "---------------------------------------------------
-function s:KillAutoInst() 
+function s:KillAutoInst()
     let orig_idx = line('.')
     let orig_col = col('.')
     let idx = line('.')
@@ -1180,11 +1187,11 @@ function s:KillAutoInst()
 endfunction
 "}}}2
 
-"AutoInst-Draw 
+"AutoInst-Draw
 "DrawIO 按格式输出例化IO口{{{2
 "--------------------------------------------------
 " Function: DrawIO
-" Input: 
+" Input:
 "   io_seqs : new inst io sequences for align
 "   io_list : old inst io name list
 "   chg_io_names : old inst io names that has been changed
@@ -1220,11 +1227,11 @@ function s:DrawIO(io_seqs,io_list,chg_io_names,tcmt_names)
         let type = value[0]
 
         "calculate maximum len of position to Draw
-        if type != 'keep' 
+        if type != 'keep'
             let name = value[5]
             let width = value[8]
             let connect = name.width
-            "io that's changed will be keeped if config 
+            "io that's changed will be keeped if config
             if g:atv_autoinst_keep_chg == 1
                 if(has_key(chg_io_names,name))
                     let connect = chg_io_names[name]
@@ -1261,7 +1268,7 @@ function s:DrawIO(io_seqs,io_list,chg_io_names,tcmt_names)
         let type = value[0]
         let line = value[7]
         "add single comment/ifdef line{{{4
-        if type == 'keep' 
+        if type == 'keep'
             if line =~ '^\s*\/\/'
                 if g:atv_autoinst_incl_cmnt == 1
                     let line = prefix.substitute(line,'^\s*','','')
@@ -1293,7 +1300,7 @@ function s:DrawIO(io_seqs,io_list,chg_io_names,tcmt_names)
             "width
             let width = value[8]
 
-            "io that's changed will be keeped if config 
+            "io that's changed will be keeped if config
             let connect = name.width
             if g:atv_autoinst_keep_chg == 1
                 if(has_key(chg_io_names,name))
@@ -1302,7 +1309,7 @@ function s:DrawIO(io_seqs,io_list,chg_io_names,tcmt_names)
                     let s:lspace = ''
                 endif
             endif
-            
+
             "width2bracket
             "don't align tail if config
             if g:atv_autoinst_tail_nalign == 1
@@ -1360,7 +1367,8 @@ function s:DrawIO(io_seqs,io_list,chg_io_names,tcmt_names)
             "update list, draw io by config
             if io_list_empty == 0
                 "process //INST_NEW
-                let io_idx = index(io_list,name) 
+                let io_idx = index(io_list,name)
+
                 "name not exist in old io_list, add //INST_NEW
                 if io_idx == -1
                     if g:atv_autoinst_inst_new == 1
@@ -1392,8 +1400,8 @@ function s:DrawIO(io_seqs,io_list,chg_io_names,tcmt_names)
             "add user tail comment
             if has_key(tcmt_names,name)
                 let user_tcmt = tcmt_names[name]
-                if g:atv_autoinst_usr_cmnt == 1 && user_tcmt != '' 
-                    if (user_tcmt != io_dir) 
+                if g:atv_autoinst_usr_cmnt == 1 && user_tcmt != ''
+                    if (user_tcmt != io_dir)
                                 \ && (user_tcmt != 'INST_NEW')
                                 \ && (user_tcmt != io_dir.g:atv_autoinst_tcmt_delim.'INST_NEW')
                         let line = line.' //'.user_tcmt
@@ -1405,7 +1413,7 @@ function s:DrawIO(io_seqs,io_list,chg_io_names,tcmt_names)
 
             "in case special case happen(last port has been put in keep_io_list, there exist no last_port)
             "same time last line is not an io type, must record last_port index here
-            let self_last_port_idx = index(lines,line) 
+            let self_last_port_idx = index(lines,line)
 
         endif
     "}}}4
@@ -1415,7 +1423,7 @@ function s:DrawIO(io_seqs,io_list,chg_io_names,tcmt_names)
     if g:atv_autoinst_style == 0
         if last_port_flag == 0
             "set last item as last_port
-            let lines[self_last_port_idx] = substitute(lines[self_last_port_idx],',',' ','') 
+            let lines[self_last_port_idx] = substitute(lines[self_last_port_idx],',',' ','')
         endif
     "no speicial case for first port
     endif
@@ -1446,4 +1454,3 @@ endfunction
 "}}}2
 
 "}}}1
-
