@@ -517,10 +517,11 @@ function g:AutoVerilog_GetIO(lines,mode)
             elseif line =~ '^\s*'. s:VlogTypePorts || line =~ '^\s*(\s*'.s:VlogTypePorts || line =~ '^\s*,\s*'.s:VlogTypePorts
                 let wait_port = 0
 
-                "Remove trailing // comments before parsing port names.
+                "Remove trailing // and inline /* ... */ comments before parsing port names.
                 if line =~ '\/\/.*$'
                     let line = substitute(line,'\/\/.*$','','')
                 endif
+                let line = substitute(line,'/\*.\{-}\*/','','g')
 
                 "Preserve signed metadata for AUTODEF/AUTOWIRE/AUTOREG.
                 let signed_flag = line =~ '\<signed\>' ? 1 : 0
