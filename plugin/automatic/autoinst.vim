@@ -522,6 +522,9 @@ function g:AutoVerilog_GetIO(lines,mode)
                     let line = substitute(line,'\/\/.*$','','')
                 endif
 
+                "Preserve signed metadata for AUTODEF/AUTOWIRE/AUTOREG.
+                let signed_flag = line =~ '\<signed\>' ? 1 : 0
+
                 "delete abnormal
                 if line =~ '\<signed\>\|\<unsigned\>'
                     let line = substitute(line,'\<signed\>\|\<unsigned\>','','')
@@ -597,8 +600,8 @@ function g:AutoVerilog_GetIO(lines,mode)
                     let name = substitute(name,'\s*','','g')          "delete redundant space
                     let name = matchstr(name,'\w\+')
                     if name != ''
-                        "dict       [type,sequence,io_dir, width1, width2, signal_name, last_port, line, width, first_port ]
-                        let value = [type,seq,     io_dir, width1, width2, name,        0,         '',   width, '']
+                        "dict       [type,sequence,io_dir, width1, width2, signal_name, last_port, line, width, first_port, signed ]
+                        let value = [type,seq,     io_dir, width1, width2, name,        0,         '',   width, '',          signed_flag]
                         call extend(io_seqs, {seq : value})
                         let seq = seq + 1
                     endif
@@ -630,7 +633,7 @@ function g:AutoVerilog_GetIO(lines,mode)
                 let name = matchstr(line,'\w\+\.\=\w*'.'\s\+'.'\zs\w\+\ze')
 
                 "           [type,  sequence, io_dir, width1, width2, signal_name, last_port, line,     width, first_port ]
-                let value = [type,  seq,      io_dir, 'c0',   'c0',   name,        0,         ifname,   '',    '']
+                let value = [type,  seq,      io_dir, 'c0',   'c0',   name,        0,         ifname,   '',    '',     0]
                 call extend(io_seqs, {seq : value})
                 let seq = seq + 1
 

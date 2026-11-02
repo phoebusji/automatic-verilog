@@ -966,13 +966,13 @@ function s:DrawReg(reg_names,reg_list)
         if type == 'reg'
             let name = value[3]
             let width = value[2]
-            "calculate maximum len of position to Draw
-            "let line = prefix.'reg'.'  '.width.width2name.name.name2semicol.semicol
-            if g:atv_autodef_logic == 1
-                let max_lname_len = max([max_lname_len,len(prefix)+len('logic ')+len(width)+4,g:atv_autodef_name_pos])
-            else 
-                let max_lname_len = max([max_lname_len,len(prefix)+len('reg  ')+len(width)+4,g:atv_autodef_name_pos])
+            let signed_flag = len(value) > 6 && value[6] == 1
+            let decl_prefix = g:atv_autodef_logic == 1 ? 'logic ' : 'reg  '
+            if signed_flag
+                let decl_prefix = g:atv_autodef_logic == 1 ? 'logic signed ' : 'reg signed '
             endif
+            "calculate maximum len of position to Draw
+            let max_lname_len = max([max_lname_len,len(prefix)+len(decl_prefix)+len(width)+4,g:atv_autodef_name_pos])
             let max_rsemicol_len = max([max_rsemicol_len,max_lname_len+len(name)+4,g:atv_autodef_sym_pos])
         endif
     endfor
@@ -1024,9 +1024,14 @@ function s:DrawReg(reg_names,reg_list)
 
         "width
         let width = value[2]
+        let signed_flag = len(value) > 6 && value[6] == 1
+        let decl_prefix = g:atv_autodef_logic == 1 ? 'logic ' : 'reg  '
+        if signed_flag
+            let decl_prefix = g:atv_autodef_logic == 1 ? 'logic signed ' : 'reg signed '
+        endif
 
         "width2name
-        let width2name = repeat(' ',max_lname_len-len(prefix)-len(width)-len('reg  '))
+        let width2name = repeat(' ',max_lname_len-len(prefix)-len(decl_prefix)-len(width))
 
         "name
         let name = value[3]
@@ -1045,18 +1050,10 @@ function s:DrawReg(reg_names,reg_list)
         "Draw reg by config
         "empty list, default
         if reg_list_empty == 1
-            if g:atv_autodef_logic == 1
-                let line = prefix.'logic'.' '.width.width2name.name.name2semicol.semicol
-            else
-                let line = prefix.'reg'.'  '.width.width2name.name.name2semicol.semicol
-            endif
+            let line = prefix.decl_prefix.width.width2name.name.name2semicol.semicol
         "update list,draw reg by config
         else
-            if g:atv_autodef_logic == 1
-                let line = prefix.'logic'.' '.width.width2name.name.name2semicol.semicol
-            else
-                let line = prefix.'reg'.'  '.width.width2name.name.name2semicol.semicol
-            endif
+            let line = prefix.decl_prefix.width.width2name.name.name2semicol.semicol
             "process //REG_NEW
             let reg_idx = index(reg_list,name) 
             "name not exist in old reg_list, add //REG_NEW
@@ -1100,9 +1097,14 @@ function s:DrawReg(reg_names,reg_list)
 
         "width
         let width = value[2]
+        let signed_flag = len(value) > 6 && value[6] == 1
+        let decl_prefix = g:atv_autodef_logic == 1 ? 'logic ' : 'reg  '
+        if signed_flag
+            let decl_prefix = g:atv_autodef_logic == 1 ? 'logic signed ' : 'reg signed '
+        endif
 
         "width2name
-        let width2name = repeat(' ',max_lname_len-len(prefix)-len(width)-len('reg  '))
+        let width2name = repeat(' ',max_lname_len-len(prefix)-len(decl_prefix)-len(width))
 
         "name
         let name = value[3]
@@ -1121,18 +1123,10 @@ function s:DrawReg(reg_names,reg_list)
         "Draw reg by config
         "empty list, default
         if reg_list_empty == 1
-            if g:atv_autodef_logic == 1
-                let line = prefix.'logic'.' '.width.width2name.name.name2semicol.semicol
-            else
-                let line = prefix.'reg'.'  '.width.width2name.name.name2semicol.semicol
-            endif
+            let line = prefix.decl_prefix.width.width2name.name.name2semicol.semicol
         "update list,draw reg by config
         else
-            if g:atv_autodef_logic == 1
-                let line = prefix.'logic'.' '.width.width2name.name.name2semicol.semicol
-            else
-                let line = prefix.'reg'.'  '.width.width2name.name.name2semicol.semicol
-            endif
+            let line = prefix.decl_prefix.width.width2name.name.name2semicol.semicol
             "process //REG_NEW
             let reg_idx = index(reg_list,name) 
             "name not exist in old reg_list, add //REG_NEW
@@ -1364,7 +1358,7 @@ endfunction
 "    0     1            2      3             4            5         6
 "   [seqs, signal_name, lines, module_names, conn_widths, resolved, stype]
 "---------------------------------------------------
-function s:GetiWire(lines,files,modules,reg_width_names,decl_reg,io_names,reg_width_hints)
+function s:GetiWire(lines,files,modules,reg_width_names,decl_reg,io_names,reg_width_hints,reg_signed_hints)
     let width_names = {}
 
     "Get current module io
@@ -1509,22 +1503,30 @@ function s:GetiWire(lines,files,modules,reg_width_names,decl_reg,io_names,reg_wi
                         echohl ErrorMsg | echo "Error when get ".port." from ".module_name| echohl None
                     endif
 
-                    "Record child-port width hints for inferred registers.
-                    "Only direct whole-signal connections provide hints; a
-                    "part-select such as data[3:0] does not describe the whole
-                    "top-level signal width.
+                    "Resolve a direct connection or numeric select to its full
+                    "top-level vector extent. Symbolic selects are kept unknown.
+                    let port_signed = 0
+                    let child_port_width = ''
                     if has_key(inst_io_names,port)
-                                \ && conn =~ '^\s*\h\w*\s*$'
-                                \ && (has_key(a:reg_width_names,conn_name)
-                                \     || index(a:decl_reg,conn_name) != -1)
-                        let child_port_width = ''
+                        let port_signed = len(value) > 10 && value[10] == 1 ? 1 : 0
                         if value[3] !=# 'c0' && value[4] !=# 'c0'
                             let child_port_width = '['.value[3].':'.value[4].']'
                         endif
-                        if !has_key(a:reg_width_hints,conn_name)
-                            call extend(a:reg_width_hints,{conn_name : []})
+                    endif
+                    let conn_info = s:AutoDefGetConnectionWidth(conn,child_port_width)
+
+                    "Collect width and signedness hints for inferred registers.
+                    if has_key(a:reg_width_names,conn_name)
+                                \ || index(a:decl_reg,conn_name) != -1
+                        if port_signed
+                            let a:reg_signed_hints[conn_name] = 1
                         endif
-                        call add(a:reg_width_hints[conn_name],child_port_width)
+                        if conn_info.known && conn_info.width !=# ''
+                            if !has_key(a:reg_width_hints,conn_name)
+                                let a:reg_width_hints[conn_name] = []
+                            endif
+                            call add(a:reg_width_hints[conn_name],conn_info.width)
+                        endif
                     endif
 
                     "if it's reg, it can't be wire
@@ -1539,50 +1541,48 @@ function s:GetiWire(lines,files,modules,reg_width_names,decl_reg,io_names,reg_wi
 
                     "use only signal that can be wire
                     if wire_status <= 2
-                        "if error get inst wire from inst file, unresolved
-                        if wire_status == -1
-                            let conn_width = conn_width
+                        "For symbolic/complex selects, keep the signal candidate
+                        "but leave its complete width unresolved.
+                        if conn_info.known
+                            let conn_width = conn_info.width
                         else
-                            "if connection width not exist, use port_width
-                            if conn_width == '' 
-                                if value[3] == 'c0' || value[4] == 'c0'
-                                    let port_width = ''
-                                else
-                                    let port_width = '['.value[3].':'.value[4].']'
-                                endif
-                                let conn_width = port_width
-                            "if conneciton width exist, use connection width
-                            else
-                                let conn_width = conn_width
-                            endif
+                            let conn_width = ''
                         endif
 
                         "inst wire
                         "       .port_a (port_a_o [4:0]),
-                        if has_key(width_names,conn_name)
+                        let had_previous = has_key(width_names,conn_name)
+                        if had_previous
                             let old_value = width_names[conn_name]
                             let seqs = add(old_value[0],seq)
                             let inst_lines = add(old_value[2],inst_line)
                             let module_names = add(old_value[3],module_name)
                             let conn_widths = add(old_value[4],conn_width)
+                            let signed_flag = (len(old_value) > 7 && old_value[7] == 1) || port_signed ? 1 : 0
                         else
                             let seqs = [seq]
                             let inst_lines = [inst_line]
                             let module_names = [module_name]
                             let conn_widths = [conn_width]
+                            let signed_flag = port_signed
                         endif
 
-                        "resolved
-                        if wire_status <= 0
+                        "A name is resolved only when every contributing child
+                        "connection exposes a complete width. This makes the
+                        "result independent of instance/port traversal order.
+                        if wire_status <= 0 || !conn_info.known
                             let resolved = 0
                         else
                             let resolved = 1
                         endif
+                        if had_previous && old_value[5] == 0
+                            let resolved = 0
+                        endif
 
                                 "   width_names
-                                "    0     1            2           3             4            5         6
-                                "   [seqs, signal_name, lines,      module_names, conn_widths, resolved, type]
-                        let value = [seqs, conn_name,   inst_lines, module_names, conn_widths, resolved, stype]
+                                "    0     1            2           3             4            5         6      7
+                                "   [seqs, signal_name, lines,      module_names, conn_widths, resolved, type, signed]
+                        let value = [seqs, conn_name,   inst_lines, module_names, conn_widths, resolved, stype, signed_flag]
                         
                         call extend(width_names,{conn_name : value})
                         "echo 'name = '.conn_name.join(conn_widths)
@@ -1905,18 +1905,17 @@ function s:DrawWire(wire_names,wire_list)
         if type == 'wire'
             let name = value[3]
             let width = value[2]
+            let signed_flag = len(value) > 6 && value[6] == 1
             "calculate maximum len of position to Draw
-            "let line = prefix.'wire'.' '.width.width2name.name.name2semicol.semicol
             if stype == 'iwire' || stype == 'awire'
                 let stype = 'wire'
-            else
-                "logic & real
             endif
             if g:atv_autodef_logic == 1
-                let max_lname_len = max([max_lname_len,len(prefix)+len('logic ')+len(width)+4,g:atv_autodef_name_pos])
-            else 
-                let max_lname_len = max([max_lname_len,len(prefix)+len(stype)+len(' ')+len(width)+4,g:atv_autodef_name_pos])
+                let decl_prefix = signed_flag ? 'logic signed ' : 'logic '
+            else
+                let decl_prefix = stype.(signed_flag ? ' signed ' : ' ')
             endif
+            let max_lname_len = max([max_lname_len,len(prefix)+len(decl_prefix)+len(width)+4,g:atv_autodef_name_pos])
             let max_rsemicol_len = max([max_rsemicol_len,max_lname_len+len(name)+4,g:atv_autodef_sym_pos])
         endif
     endfor
@@ -1968,9 +1967,11 @@ function s:DrawWire(wire_names,wire_list)
 
         "width
         let width = value[2]
+        let signed_flag = len(value) > 6 && value[6] == 1
+        let decl_prefix = signed_flag ? (g:atv_autodef_logic == 1 ? 'logic signed ' : 'wire signed ') : (g:atv_autodef_logic == 1 ? 'logic ' : 'wire ')
 
         "width2name
-        let width2name = repeat(' ',max_lname_len-len(prefix)-len(width)-len('wire '))
+        let width2name = repeat(' ',max_lname_len-len(prefix)-len(decl_prefix)-len(width))
 
         "name
         let name = value[3]
@@ -1989,18 +1990,10 @@ function s:DrawWire(wire_names,wire_list)
         "Draw wire by config
         "empty list, default
         if wire_list_empty == 1
-            if g:atv_autodef_logic == 1
-                let line = prefix.'logic'.' '.width.width2name.name.name2semicol.semicol
-            else
-                let line = prefix.'wire'.' '.width.width2name.name.name2semicol.semicol
-            endif
+            let line = prefix.decl_prefix.width.width2name.name.name2semicol.semicol
         "update list,draw wire by config
         else
-            if g:atv_autodef_logic == 1
-                let line = prefix.'logic'.' '.width.width2name.name.name2semicol.semicol
-            else
-                let line = prefix.'wire'.' '.width.width2name.name.name2semicol.semicol
-            endif
+            let line = prefix.decl_prefix.width.width2name.name.name2semicol.semicol
             "process //WIRE_NEW
             let wire_idx = index(wire_list,name) 
             "name not exist in old wire_list, add //WIRE_NEW
@@ -2044,15 +2037,19 @@ function s:DrawWire(wire_names,wire_list)
 
         "width
         let width = value[2]
+        let signed_flag = len(value) > 6 && value[6] == 1
 
         "width2name
         let stype = value[1]
         if stype == 'iwire' || stype == 'awire'
             let stype = 'wire'
-        else
-            "logic & real
         endif
-        let width2name = repeat(' ',max_lname_len-len(prefix)-len(width)-len(stype)-len(' '))
+        if g:atv_autodef_logic == 1
+            let decl_prefix = signed_flag ? 'logic signed ' : 'logic '
+        else
+            let decl_prefix = stype.(signed_flag ? ' signed ' : ' ')
+        endif
+        let width2name = repeat(' ',max_lname_len-len(prefix)-len(width)-len(decl_prefix))
 
         "name
         let name = value[3]
@@ -2071,18 +2068,10 @@ function s:DrawWire(wire_names,wire_list)
         "Draw wire by config
         "empty list, default
         if wire_list_empty == 1
-            if g:atv_autodef_logic == 1
-                let line = prefix.'logic'.' '.width.width2name.name.name2semicol.semicol
-            else
-                let line = prefix.stype.' '.width.width2name.name.name2semicol.semicol
-            endif
+            let line = prefix.decl_prefix.width.width2name.name.name2semicol.semicol
         "update list,draw wire by config
         else
-            if g:atv_autodef_logic == 1
-                let line = prefix.'logic'.' '.width.width2name.name.name2semicol.semicol
-            else
-                let line = prefix.stype.' '.width.width2name.name.name2semicol.semicol
-            endif
+            let line = prefix.decl_prefix.width.width2name.name.name2semicol.semicol
             "process //WIRE_NEW
             let wire_idx = index(wire_list,name) 
             "name not exist in old wire_list, add //WIRE_NEW
@@ -2987,7 +2976,7 @@ function s:GetAllSig(lines,mode)
         "   list of signal sequences
         "    0     1             2      3            4         5
         "   [type, specify type, width, signal_name, resolved, seq]
-        let value = ['reg',type,width,name,resolved,seqs[0]]
+        let value = ['reg',type,width,name,resolved,seqs[0],0]
         call extend(reg_names,{name : value})
         call extend(sig_names,{name : value})
     endfor
@@ -3015,8 +3004,9 @@ function s:GetAllSig(lines,mode)
         " Collect their width hints before returning the register candidates.
         let [files,modules] = g:AutoVerilog_GetModuleFileDirDic()
         let reg_width_hints = {}
-        call s:GetiWire(a:lines,files,modules,reg_width_names,decl_reg,io_names,reg_width_hints)
-        let reg_names = s:AutoDefApplyRegWidthHints(reg_names,reg_width_hints)
+        let reg_signed_hints = {}
+        call s:GetiWire(a:lines,files,modules,reg_width_names,decl_reg,io_names,reg_width_hints,reg_signed_hints)
+        let reg_names = s:AutoDefApplyRegWidthHints(reg_names,reg_width_hints,reg_signed_hints)
         return reg_names
     endif
 
@@ -3094,7 +3084,7 @@ function s:GetAllSig(lines,mode)
         "   list of signal sequences
         "    0     1             2      3            4         5
         "   [type, specify type, width, signal_name, resolved, seq]
-        let value = ['wire',type,width,name,resolved,seqs[0]]
+        let value = ['wire',type,width,name,resolved,seqs[0],0]
         call extend(wire_names,{name : value})
         call extend(sig_names,{name : value})
     endfor
@@ -3110,10 +3100,11 @@ function s:GetAllSig(lines,mode)
     "Get iwire
     "remove io, declared register and register from them
     let reg_width_hints = {}
-    let iwire_width_names = s:GetiWire(a:lines,files,modules,reg_width_names,decl_reg,io_names,reg_width_hints)
+    let reg_signed_hints = {}
+    let iwire_width_names = s:GetiWire(a:lines,files,modules,reg_width_names,decl_reg,io_names,reg_width_hints,reg_signed_hints)
 
-    " Prefer child-port widths for inferred registers as well as wires.
-    let reg_names = s:AutoDefApplyRegWidthHints(reg_names,reg_width_hints)
+    " Prefer child-port widths and signedness for inferred registers.
+    let reg_names = s:AutoDefApplyRegWidthHints(reg_names,reg_width_hints,reg_signed_hints)
     for name in keys(reg_names)
         if has_key(sig_names,name)
             let sig_names[name] = reg_names[name]
@@ -3164,15 +3155,24 @@ function s:GetAllSig(lines,mode)
 
             "use awire
             if awire_resolved == 1 && iwire_resolved == 0
+                "Keep AWIRE width, but preserve signedness from connected child ports.
+                let value = copy(awire_value)
+                if len(value) < 7
+                    call add(value,0)
+                endif
+                if len(iwire_value) > 7 && iwire_value[7] == 1
+                    let value[6] = 1
+                endif
+                call extend(sig_names,{name : value},'force')
+                call extend(wire_names,{name : value},'force')
             "use iwire
             else
                 let conn_widths = iwire_value[4]
                 let conn_width = s:AutoDefSelectPreferredWidth(conn_widths)
                 let stype = iwire_value[6]
-                "   list of signal sequences
-                "    0     1             2      3            4         5
-                "   [type, specify type, width, signal_name, resolved, seq]
-                let value = ['wire',stype,conn_width,name,0,iwire_seqs[0]]
+                let signed_flag = len(iwire_value) > 7 && iwire_value[7] == 1 ? 1 : 0
+                "   [type, specify type, width, signal_name, resolved, seq, signed]
+                let value = ['wire',stype,conn_width,name,0,iwire_seqs[0],signed_flag]
                 call extend(sig_names,{name : value})
                 call extend(wire_names,{name : value})
             endif
@@ -3181,10 +3181,9 @@ function s:GetAllSig(lines,mode)
             let conn_widths = iwire_value[4]
             let conn_width = s:AutoDefSelectPreferredWidth(conn_widths)
             let stype = iwire_value[6]
-            "   list of signal sequences
-            "    0     1             2      3            4         5
-            "   [type, specify type, width, signal_name, resolved, seq]
-            let value = ['wire',stype,conn_width,name,iwire_resolved,iwire_seqs[0]]
+            let signed_flag = len(iwire_value) > 7 && iwire_value[7] == 1 ? 1 : 0
+            "   [type, specify type, width, signal_name, resolved, seq, signed]
+            let value = ['wire',stype,conn_width,name,iwire_resolved,iwire_seqs[0],signed_flag]
             call extend(sig_names,{name : value})
             call extend(wire_names,{name : value})
         endif
@@ -3384,6 +3383,36 @@ unlet s:cpo
 "
 " Equal-priority symbolic widths keep their first occurrence.
 "-----------------------------------------------------------------------------
+
+"-----------------------------------------------------------------------------
+" Resolve a connection's contribution to the complete top-level signal width.
+" A direct connection inherits the child port width. Numeric bit/part selects
+" reveal the highest referenced bit; symbolic selects remain unknown.
+"-----------------------------------------------------------------------------
+function! s:AutoDefGetConnectionWidth(conn,port_width) abort
+    let l:conn = substitute(a:conn,'\s','','g')
+
+    "Whole signal: the child port declaration supplies its packed width.
+    if l:conn =~ '^\h\w*$'
+        return {'known':1,'width':a:port_width}
+    endif
+
+    "Single numeric bit select, e.g. data[7] -> [7:0].
+    let l:single = matchlist(l:conn,'^\h\w*\[\(\d\+\)\]$')
+    if !empty(l:single)
+        return {'known':1,'width':'['.str2nr(l:single[1]).':0]'}
+    endif
+
+    "Numeric part select, e.g. data[7:4] or data[4:7] -> [7:0].
+    let l:range = matchlist(l:conn,'^\h\w*\[\(\d\+\):\(\d\+\)\]$')
+    if !empty(l:range)
+        let l:top = max([str2nr(l:range[1]),str2nr(l:range[2])])
+        return {'known':1,'width':'['.l:top.':0]'}
+    endif
+
+    return {'known':0,'width':''}
+endfunction
+
 function! s:AutoDefSelectPreferredWidth(widths) abort
     let l:best_width = ''
     let l:best_rank = -1
@@ -3407,14 +3436,19 @@ function! s:AutoDefSelectPreferredWidth(widths) abort
 endfunction
 
 
-function! s:AutoDefApplyRegWidthHints(reg_names,hints) abort
+function! s:AutoDefApplyRegWidthHints(reg_names,hints,signed_hints) abort
     let l:result = copy(a:reg_names)
-    for l:name in keys(a:hints)
-        if !has_key(l:result,l:name) || empty(a:hints[l:name])
-            continue
-        endif
+    for l:name in keys(l:result)
         let l:value = copy(l:result[l:name])
-        let l:value[2] = s:AutoDefSelectPreferredWidth(a:hints[l:name])
+        if has_key(a:hints,l:name) && !empty(a:hints[l:name])
+            let l:value[2] = s:AutoDefSelectPreferredWidth(a:hints[l:name])
+        endif
+        if len(l:value) < 7
+            call add(l:value,0)
+        endif
+        if get(a:signed_hints,l:name,0) == 1
+            let l:value[6] = 1
+        endif
         let l:result[l:name] = l:value
     endfor
     return l:result
