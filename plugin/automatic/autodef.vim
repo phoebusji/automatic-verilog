@@ -944,13 +944,30 @@ endfunction
 "   ['reg', 'freg', '', 'a', 1, sequence]
 "   ['reg', 'creg', '[10:0]', 'b', 1, sequence]
 "       reg             a;
-"       reg  [10:0]     b;
+"       reg [10:0]     b;
 "
 " Output:
 "   line that's aligned
 "   e.g
-"       reg  [WIDTH1:WIDTH2]     reg_name;
+"       reg [WIDTH1:WIDTH2]     reg_name;
 "---------------------------------------------------
+" Return the exact type/packed-range separator used by AUTOWIRE/AUTOREG/AUTODEF.
+"   wire[7:0]      (wire-like types: no space before packed range)
+"   reg [7:0]      (reg: one space before packed range)
+"   wire signed[7:0]
+"   reg signed[7:0]
+" Scalar declarations always retain one space before the signal name.
+function! s:AutoDefDeclPrefix(base_type,width,signed_flag) abort
+    let l:base = a:base_type . (a:signed_flag ? ' signed' : '')
+    if a:base_type ==# 'reg'
+        if a:signed_flag
+            return empty(a:width) ? l:base . ' ' : l:base
+        endif
+        return l:base . ' '
+    endif
+    return empty(a:width) ? l:base . ' ' : l:base
+endfunction
+
 function s:DrawReg(reg_names,reg_list)
     let prefix = s:st_prefix
     let reg_list = copy(a:reg_list)
@@ -967,10 +984,8 @@ function s:DrawReg(reg_names,reg_list)
             let name = value[3]
             let width = value[2]
             let signed_flag = len(value) > 6 && value[6] == 1
-            let decl_prefix = g:atv_autodef_logic == 1 ? 'logic ' : 'reg  '
-            if signed_flag
-                let decl_prefix = g:atv_autodef_logic == 1 ? 'logic signed ' : 'reg signed '
-            endif
+            let decl_type = g:atv_autodef_logic == 1 ? 'logic' : 'reg'
+            let decl_prefix = s:AutoDefDeclPrefix(decl_type,width,signed_flag)
             "calculate maximum len of position to Draw
             let max_lname_len = max([max_lname_len,len(prefix)+len(decl_prefix)+len(width)+4,g:atv_autodef_name_pos])
             let max_rsemicol_len = max([max_rsemicol_len,max_lname_len+len(name)+4,g:atv_autodef_sym_pos])
@@ -1025,10 +1040,8 @@ function s:DrawReg(reg_names,reg_list)
         "width
         let width = value[2]
         let signed_flag = len(value) > 6 && value[6] == 1
-        let decl_prefix = g:atv_autodef_logic == 1 ? 'logic ' : 'reg  '
-        if signed_flag
-            let decl_prefix = g:atv_autodef_logic == 1 ? 'logic signed ' : 'reg signed '
-        endif
+        let decl_type = g:atv_autodef_logic == 1 ? 'logic' : 'reg'
+        let decl_prefix = s:AutoDefDeclPrefix(decl_type,width,signed_flag)
 
         "width2name
         let width2name = repeat(' ',max_lname_len-len(prefix)-len(decl_prefix)-len(width))
@@ -1098,10 +1111,8 @@ function s:DrawReg(reg_names,reg_list)
         "width
         let width = value[2]
         let signed_flag = len(value) > 6 && value[6] == 1
-        let decl_prefix = g:atv_autodef_logic == 1 ? 'logic ' : 'reg  '
-        if signed_flag
-            let decl_prefix = g:atv_autodef_logic == 1 ? 'logic signed ' : 'reg signed '
-        endif
+        let decl_type = g:atv_autodef_logic == 1 ? 'logic' : 'reg'
+        let decl_prefix = s:AutoDefDeclPrefix(decl_type,width,signed_flag)
 
         "width2name
         let width2name = repeat(' ',max_lname_len-len(prefix)-len(decl_prefix)-len(width))
@@ -1882,12 +1893,12 @@ endfunction
 "   ['wire', 'awire', '', 'a', 1, sequence]
 "   ['wire', 'iwire', '[10:0]', 'b', 1, sequence]
 "       wire            a;
-"       wire [10:0]     b;
+"       wire[10:0]     b;
 "
 " Output:
 "   line that's aligned
 "   e.g
-"       wire  [WIDTH1:WIDTH2]     wire_name;
+"       wire[WIDTH1:WIDTH2]     wire_name;
 "---------------------------------------------------
 function s:DrawWire(wire_names,wire_list)
     let prefix = s:st_prefix
@@ -1910,11 +1921,8 @@ function s:DrawWire(wire_names,wire_list)
             if stype == 'iwire' || stype == 'awire'
                 let stype = 'wire'
             endif
-            if g:atv_autodef_logic == 1
-                let decl_prefix = signed_flag ? 'logic signed ' : 'logic '
-            else
-                let decl_prefix = stype.(signed_flag ? ' signed ' : ' ')
-            endif
+            let decl_type = g:atv_autodef_logic == 1 ? 'logic' : stype
+            let decl_prefix = s:AutoDefDeclPrefix(decl_type,width,signed_flag)
             let max_lname_len = max([max_lname_len,len(prefix)+len(decl_prefix)+len(width)+4,g:atv_autodef_name_pos])
             let max_rsemicol_len = max([max_rsemicol_len,max_lname_len+len(name)+4,g:atv_autodef_sym_pos])
         endif
@@ -1968,7 +1976,8 @@ function s:DrawWire(wire_names,wire_list)
         "width
         let width = value[2]
         let signed_flag = len(value) > 6 && value[6] == 1
-        let decl_prefix = signed_flag ? (g:atv_autodef_logic == 1 ? 'logic signed ' : 'wire signed ') : (g:atv_autodef_logic == 1 ? 'logic ' : 'wire ')
+        let decl_type = g:atv_autodef_logic == 1 ? 'logic' : 'wire'
+        let decl_prefix = s:AutoDefDeclPrefix(decl_type,width,signed_flag)
 
         "width2name
         let width2name = repeat(' ',max_lname_len-len(prefix)-len(decl_prefix)-len(width))
@@ -2044,11 +2053,8 @@ function s:DrawWire(wire_names,wire_list)
         if stype == 'iwire' || stype == 'awire'
             let stype = 'wire'
         endif
-        if g:atv_autodef_logic == 1
-            let decl_prefix = signed_flag ? 'logic signed ' : 'logic '
-        else
-            let decl_prefix = stype.(signed_flag ? ' signed ' : ' ')
-        endif
+        let decl_type = g:atv_autodef_logic == 1 ? 'logic' : stype
+        let decl_prefix = s:AutoDefDeclPrefix(decl_type,width,signed_flag)
         let width2name = repeat(' ',max_lname_len-len(prefix)-len(width)-len(decl_prefix))
 
         "name

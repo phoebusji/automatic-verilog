@@ -5,8 +5,11 @@
 "   Generate the parent module's ports from a named child module while leaving
 "   all text before /*AUTOPORT(module)*/ untouched.
 "
-" Supported marker:
+" Supported markers:
 "   /*AUTOPORT(a)*/
+"   /**AUTOPORT(a)**/
+"   (one or more asterisks around AUTOPORT are accepted)
+"   Multiple markers in one module header own separate expansion regions.
 "
 " Commands:
 "   :AutoPort        Update the next AUTOPORT marker from the cursor
@@ -42,7 +45,7 @@ if has('menu')
     amenu 9998.2.4 &Verilog.&AutoPort.KillAutoPort(1)\ \ \ \ \ \ \ \ All :call g:KillAutoPort(1)<CR>
 endif
 
-let s:autop_marker_pat = '/\*AUTOPORT\s*(\s*\h\w*\s*)\s*\*/'
+let s:autop_marker_pat = '/\*\+\s*AUTOPORT\s*(\s*\h\w*\s*)\s*\*\+/'
 
 function! g:AutoPort(mode) abort
     if a:mode != 0 && a:mode != 1
@@ -152,38 +155,47 @@ function! s:KillAutoPortAt(marker_line) abort
     let l:marker = matchstr(l:marker_text, s:autop_marker_pat)
     let l:marker_end = l:marker_start + strlen(l:marker)
 
-    " The expansion occupies the region after the marker and before the
-    " module header's closing );. Keep the marker and closing token intact.
-    let l:close = s:FindCurrentHeaderClose(a:marker_line, l:marker_end)
-    if empty(l:close)
+    let l:header_close = s:FindCurrentHeaderClose(a:marker_line, l:marker_end)
+    if empty(l:header_close)
         echohl ErrorMsg | echomsg 'KillAutoPort: cannot find closing ); for marker at line ' . a:marker_line | echohl None
         return
     endif
-
-    let l:close_line = l:close[0]
-    let l:close_col = l:close[1]
-    let l:prefix = strpart(l:marker_text, 0, l:marker_end)
-    let l:close_text = getline(l:close_line)
-    let l:suffix = strpart(l:close_text, l:close_col)
-
-    if l:close_line == a:marker_line
-        " Marker and closing token share one line.
-        call setline(a:marker_line, l:prefix . l:suffix)
+    let l:boundary = s:FindAutoPortBoundary(a:marker_line, l:marker_end, l:header_close)
+    if empty(l:boundary)
+        echohl ErrorMsg | echomsg 'KillAutoPort: cannot determine expansion boundary at line ' . a:marker_line | echohl None
         return
     endif
 
-    " Preserve the closing line's indentation and everything from `);` onward.
-    let l:close_replacement = matchstr(l:close_text, '^\s*') . l:suffix
-    call setline(a:marker_line, l:prefix)
+    if l:boundary.kind ==# 'marker'
+        if l:boundary.line == a:marker_line
+            " Two markers share a line. There cannot be a multi-line generated
+            " expansion between them, so preserve the complete marker line.
+            return
+        endif
+        let l:prefix = strpart(l:marker_text, 0, l:marker_end)
+        call setline(a:marker_line, l:prefix)
+        let l:first = a:marker_line + 1
+        let l:last = l:boundary.line - 1
+        if l:first <= l:last
+            execute l:first . ',' . l:last . 'delete _'
+        endif
+        return
+    endif
 
-    " Remove all lines between the marker and closing token, then place the
-    " preserved closing token directly below the marker.
+    " Last AUTOPORT marker in this header: remove through the header's `);`.
+    let l:close_line = l:boundary.line
+    let l:close_col = l:boundary.col
+    let l:prefix = strpart(l:marker_text, 0, l:marker_end)
+    let l:close_text = getline(l:close_line)
+    let l:suffix = strpart(l:close_text, l:close_col)
+    let l:close_replacement = matchstr(l:close_text, '^\s*') . l:suffix
+
+    call setline(a:marker_line, l:prefix)
     if l:close_line > a:marker_line + 1
         execute (a:marker_line + 1) . ',' . (l:close_line - 1) . 'delete _'
     endif
     call setline(a:marker_line + 1, l:close_replacement)
 endfunction
-
 
 function! s:AutoPortAt(marker_line) abort
     let l:marker_text = getline(a:marker_line)
@@ -211,13 +223,19 @@ function! s:AutoPortAt(marker_line) abort
         return
     endif
 
-    let l:close = s:FindCurrentHeaderClose(a:marker_line, l:marker_end)
-    if empty(l:close)
+    let l:header_close = s:FindCurrentHeaderClose(a:marker_line, l:marker_end)
+    if empty(l:header_close)
         echohl ErrorMsg | echomsg 'AutoPort: cannot find closing ); for marker at line ' . a:marker_line | echohl None
         return
     endif
-    let l:close_line = l:close[0]
-    let l:close_col = l:close[1]
+    let l:boundary = s:FindAutoPortBoundary(a:marker_line, l:marker_end, l:header_close)
+    if empty(l:boundary)
+        echohl ErrorMsg | echomsg 'AutoPort: cannot determine expansion boundary at line ' . a:marker_line | echohl None
+        return
+    endif
+    let l:close_line = l:boundary.line
+    let l:close_col = l:boundary.col
+    let l:header_close_line = l:header_close[0]
 
     " Record ports from the previous AUTOPORT expansion. Like AUTOINST, an
     " empty old port list is treated as an initial expansion: it does not mark
@@ -269,7 +287,19 @@ function! s:AutoPortAt(marker_line) abort
         endif
     endfor
 
-    let l:body_start = l:close_line + 1
+    " Port declarations belonging to later AUTOPORT markers are also visible
+    " when checking conflicts. This prevents duplicate names when several
+    " child modules contribute ports to one parent header.
+    if l:boundary.kind ==# 'marker' && l:boundary.line < l:header_close_line
+        for l:i in range(l:boundary.line, l:header_close_line - 1)
+            let l:pname = s:PortNameFromLine(getline(l:i))
+            if !empty(l:pname)
+                let l:conflicts[l:pname] = 1
+            endif
+        endfor
+    endif
+
+    let l:body_start = l:header_close_line + 1
     let l:body_end = line('$')
     " Stop at the end of the enclosing module, rather than considering later
     " modules in the same file.
@@ -283,7 +313,15 @@ function! s:AutoPortAt(marker_line) abort
     endif
     if l:body_start <= l:body_end
         for l:i in range(l:body_start, l:body_end)
+            " Explicit declarations are conflicts as before.
             for l:name in s:DeclaredNamesFromLine(getline(l:i))
+                let l:conflicts[l:name] = 1
+            endfor
+            " Also treat assignment LHS names as locally driven signals.
+            " This catches undeclared procedural variables such as:
+            "   rd_motion_tggl <= 'd0;
+            " which must not be regenerated as a parent input port.
+            for l:name in s:AssignedNamesFromLine(getline(l:i))
                 let l:conflicts[l:name] = 1
             endfor
         endfor
@@ -341,8 +379,21 @@ function! s:AutoPortAt(marker_line) abort
         endif
     endfor
 
-    " Remove commas from every possible last port in each preprocessor branch.
-    " This avoids leaving a dangling comma when a later port was filtered out.
+    " Check whether another AUTOPORT region contributes ports after this one.
+    " A region's last declaration needs a comma when a later marker adds ports;
+    " only the final declaration in the complete module header is comma-free.
+    let l:has_later_region_ports = 0
+    if l:boundary.kind ==# 'marker' && l:boundary.line < l:header_close_line
+        for l:i in range(l:boundary.line, l:header_close_line - 1)
+            if !empty(s:PortNameFromLine(getline(l:i)))
+                let l:has_later_region_ports = 1
+                break
+            endif
+        endfor
+    endif
+
+    " Remove/add commas from every possible last port in each preprocessor
+    " branch, taking later AUTOPORT regions into account.
     for l:i in range(0, len(l:port_records) - 1)
         let l:has_later = 0
         for l:j in range(l:i + 1, len(l:port_records) - 1)
@@ -353,7 +404,11 @@ function! s:AutoPortAt(marker_line) abort
         endfor
         if !l:has_later
             let l:line_idx = l:port_records[l:i].line
-            let l:new_body[l:line_idx] = s:RemoveTrailingPortComma(l:new_body[l:line_idx])
+            if l:has_later_region_ports
+                let l:new_body[l:line_idx] = s:EnsureTrailingPortComma(l:new_body[l:line_idx])
+            else
+                let l:new_body[l:line_idx] = s:RemoveTrailingPortComma(l:new_body[l:line_idx])
+            endif
         endif
     endfor
 
@@ -393,12 +448,10 @@ function! s:AutoPortAt(marker_line) abort
         endfor
     endif
 
-    " Replace from immediately after the marker to the closing ')' only. The
-    " bytes preceding the marker are written back unchanged.
+    " Replace only this marker's region. If another AUTOPORT marker follows in
+    " the same module header, leave that marker and its expansion untouched.
     let l:prefix = strpart(l:marker_text, 0, l:marker_end)
     if empty(l:port_records)
-        " A trailing comma before the marker cannot be fixed without violating
-        " the explicit rule that text before AUTOPORT is immutable.
         for l:prior in reverse(copy(l:header_before))
             let l:prior_clean = s:StripComments([l:prior])[0]
             if !empty(s:PortNameFromLine(l:prior_clean))
@@ -409,22 +462,48 @@ function! s:AutoPortAt(marker_line) abort
             endif
         endfor
     endif
-    let l:close_text = getline(l:close_line)
-    let l:indent = matchstr(l:close_text, '^\s*')
-    let l:suffix = strpart(l:close_text, l:close_col)
-    let l:replacement = [l:prefix] + l:new_body + [l:indent . l:suffix]
-    let l:old_span = l:close_line - a:marker_line
 
-    call setline(a:marker_line, l:replacement[0])
-    if len(l:replacement) > 1
-        call append(a:marker_line, l:replacement[1:])
-    endif
-    " Appending inserted new lines before the old region; delete the shifted old
-    " lines between the marker and original close line.
-    if l:old_span > 0
-        let l:delete_start = a:marker_line + len(l:replacement)
-        let l:delete_end = l:delete_start + l:old_span - 1
-        execute l:delete_start . ',' . l:delete_end . 'delete _'
+    let l:old_span = l:close_line - a:marker_line
+    if l:boundary.kind ==# 'marker'
+        if l:close_line == a:marker_line
+            " Same-line markers: preserve the second marker as a separate line.
+            let l:between = strpart(l:marker_text, l:marker_end, l:close_col - l:marker_end)
+            let l:after = strpart(l:marker_text, l:close_col)
+            if empty(l:new_body)
+                call setline(a:marker_line, l:prefix . l:between . l:after)
+            else
+                call setline(a:marker_line, l:prefix)
+                call append(a:marker_line, l:new_body + [l:between . l:after])
+            endif
+        else
+            call setline(a:marker_line, l:prefix)
+            if !empty(l:new_body)
+                call append(a:marker_line, l:new_body)
+            endif
+            let l:old_count = l:close_line - a:marker_line - 1
+            let l:delete_start = a:marker_line + len(l:new_body) + 1
+            let l:delete_end = l:delete_start + l:old_count - 1
+            if l:old_count > 0
+                execute l:delete_start . ',' . l:delete_end . 'delete _'
+            endif
+        endif
+    else
+        " Last marker before `);`: keep the original header terminator intact.
+        let l:close_text = getline(l:close_line)
+        let l:indent = matchstr(l:close_text, '^\s*')
+        let l:suffix = strpart(l:close_text, l:close_col)
+        let l:close_replacement = l:indent . l:suffix
+        call setline(a:marker_line, l:prefix)
+        if !empty(l:new_body)
+            call append(a:marker_line, l:new_body)
+        endif
+        let l:old_count = l:close_line - a:marker_line - 1
+        let l:delete_start = a:marker_line + len(l:new_body) + 1
+        let l:delete_end = l:delete_start + l:old_count - 1
+        if l:old_count > 0
+            execute l:delete_start . ',' . l:delete_end . 'delete _'
+        endif
+        call setline(a:marker_line + len(l:new_body) + 1, l:close_replacement)
     endif
 endfunction
 
@@ -608,6 +687,32 @@ function! s:FindMatchingParen(text, open) abort
     return -1
 endfunction
 
+function! s:FindAutoPortBoundary(marker_line, marker_end, header_close) abort
+    let l:next = s:FindNextAutoPortMarker(a:marker_line, a:marker_end)
+    if !empty(l:next)
+        if l:next[0] < a:header_close[0]
+                    \ || (l:next[0] == a:header_close[0] && l:next[1] < a:header_close[1])
+            return {'line': l:next[0], 'col': l:next[1], 'kind': 'marker'}
+        endif
+    endif
+    return {'line': a:header_close[0], 'col': a:header_close[1], 'kind': 'close'}
+endfunction
+
+function! s:FindNextAutoPortMarker(marker_line, marker_end) abort
+    let l:lnum = a:marker_line
+    let l:start = a:marker_end
+    while l:lnum <= line('$')
+        let l:text = getline(l:lnum)
+        let l:pos = match(l:text, s:autop_marker_pat, l:start)
+        if l:pos >= 0 && l:text !~ '^\s*//'
+            return [l:lnum, l:pos]
+        endif
+        let l:lnum += 1
+        let l:start = 0
+    endwhile
+    return []
+endfunction
+
 function! s:FindCurrentHeaderClose(marker_line, marker_end) abort
     let l:marker_line_text = getline(a:marker_line)
     let l:close_pos = match(l:marker_line_text, ')\s*;', a:marker_end)
@@ -699,6 +804,91 @@ function! s:DeclaredNamesFromLine(line) abort
     return l:names
 endfunction
 
+function! s:AssignedNamesFromLine(line) abort
+    " Identify simple procedural/continuous assignment targets on a line.
+    " Examples:
+    "   rd_motion_tggl <= 'd0;
+    "   if (rst_n) rd_motion_tggl <= 1'b1;
+    "   count = count + 1;
+    "   data[7:0] <= value;
+    "   {valid, ready} <= 2'b0;
+    " This is intentionally a lightweight line-oriented parser rather than
+    " a complete Verilog grammar. Complex/multiline lvalues are not inferred.
+    let l:work = s:StripComments([a:line])[0]
+    if l:work =~ '^\s*`'
+        return []
+    endif
+
+    " For a one-line `if (condition) statement`, skip the condition first.
+    " This prevents a relational `<=` inside the condition from looking like
+    " a nonblocking assignment, while still detecting the statement's LHS.
+    let l:work = substitute(l:work, '^\s*else\s*', '', '')
+    if l:work =~ '^\s*if\>'
+        let l:open = match(l:work, '(')
+        if l:open >= 0
+            let l:depth = 0
+            let l:close = -1
+            for l:i in range(l:open, strlen(l:work) - 1)
+                let l:ch = strpart(l:work, l:i, 1)
+                if l:ch ==# '('
+                    let l:depth += 1
+                elseif l:ch ==# ')'
+                    let l:depth -= 1
+                    if l:depth == 0
+                        let l:close = l:i
+                        break
+                    endif
+                endif
+            endfor
+            if l:close >= 0
+                let l:work = strpart(l:work, l:close + 1)
+            else
+                return []
+            endif
+        else
+            return []
+        endif
+    endif
+
+    " Allow a continuous-assign prefix.
+    let l:work = substitute(l:work, '^\s*assign\s\+', '', '')
+
+    " Find <= (nonblocking), common compound assignments, or a standalone =.
+    " The standalone form excludes equality/relational operators.
+    let l:op = match(l:work, '\%(<<=\|>>=\|<=\|+=\|-=\|\*=\|/=\|%=\|&=\||=\|\^=\|\%([!<>=]\)\@<!=\%([=>]\)\@!\)')
+    if l:op < 0
+        return []
+    endif
+    let l:lhs = substitute(strpart(l:work, 0, l:op), '^\s*', '', '')
+    let l:lhs = substitute(l:lhs, '\s*$', '', '')
+    if empty(l:lhs)
+        return []
+    endif
+
+    " Accept a simple identifier/bit-select, or a concatenation of them.
+    let l:simple_lvalue = '^\h\w*\%(\s*\[[^]]*\]\)\?\s*$'
+    let l:concat_lvalue = '^\s*{\s*\h\w*\%(\s*\[[^]]*\]\)\?\%(\s*,\s*\h\w*\%(\s*\[[^]]*\]\)\?\)*\s*}\s*$'
+    if l:lhs !~# l:simple_lvalue && l:lhs !~# l:concat_lvalue
+        return []
+    endif
+
+    " Index expressions do not name the assigned object (data[addr] writes
+    " data, not addr), so remove bracketed selects before collecting ids.
+    let l:lhs = substitute(l:lhs, '\[[^]]*\]', '', 'g')
+    let l:names = []
+    let l:pos = 0
+    while 1
+        let l:start = match(l:lhs, '\h\w*', l:pos)
+        if l:start < 0
+            break
+        endif
+        let l:name = matchstr(l:lhs, '\h\w*', l:pos)
+        call add(l:names, l:name)
+        let l:pos = l:start + strlen(l:name)
+    endwhile
+    return l:names
+endfunction
+
 function! s:AddPortChangeComment(line, tag) abort
     " Append the tag to an existing // comment if present; otherwise add a
     " new trailing line comment. This keeps original source comments intact.
@@ -716,13 +906,15 @@ endfunction
 " Align generated port declaration columns without reordering any lines.
 "
 " Format policy:
-"   indent + direction padded to 6 columns + type/width + port name + comma
-"   signed/unsigned and macro expressions are retained verbatim.
+"   input  wire ..., output wire/reg ..., inout  wire ...
+"   non-signed packed-width '[' characters share one column;
+"   signed declarations are excluded from '[' alignment.
+"   port names, commas, and comments are aligned without reordering lines.
 "   comments and all preprocessor/non-port lines are retained.
 " -----------------------------------------------------------------------------
 function! s:FormatPortLines(lines) abort
     let l:entries = {}
-    let l:max_prefix = 0
+    let l:max_decl_len = 0
     let l:max_name = 0
 
     for l:i in range(0, len(a:lines) - 1)
@@ -730,7 +922,6 @@ function! s:FormatPortLines(lines) abort
         let l:clean = s:StripComments([l:raw])[0]
         let l:clean = substitute(l:clean, '\s*$', '', '')
         let l:pname = s:PortNameFromLine(l:clean)
-
         if empty(l:pname)
             continue
         endif
@@ -742,14 +933,8 @@ function! s:FormatPortLines(lines) abort
         let l:comment = l:comment_pos >= 0 ? strpart(l:raw, l:comment_pos) : ''
 
         let l:has_comma = l:clean =~ ',\s*$'
-        let l:code = l:clean
-        if l:has_comma
-            let l:code = substitute(l:code, ',\s*$', '', '')
-        endif
-        " The original RTL often pads port names with spaces before the comma.
-        " Remove that padding before locating the identifier.
+        let l:code = l:has_comma ? substitute(l:clean, ',\s*$', '', '') : l:clean
         let l:code = substitute(l:code, '\s\+$', '', '')
-
         let l:indent = matchstr(l:code, '^\s*')
         let l:after_indent = strpart(l:code, strlen(l:indent))
         let l:direction = matchstr(l:after_indent, '^\%(input\|output\|inout\)\>')
@@ -763,24 +948,33 @@ function! s:FormatPortLines(lines) abort
             continue
         endif
         let l:name = strpart(l:code, l:name_pos)
-
         let l:type_part = strpart(l:code, l:dir_end, l:name_pos - l:dir_end)
         let l:type_part = substitute(l:type_part, '^\s\+', '', '')
         let l:type_part = substitute(l:type_part, '\s\+$', '', '')
+        let l:type_part = substitute(l:type_part, '\s\+', ' ', 'g')
 
-        let l:prefix = l:indent . printf('%-6s', l:direction)
-        if !empty(l:type_part)
-            let l:prefix .= ' ' . l:type_part
+        " Canonical packed-range spacing:
+        "   wire[W:0], wire signed[W:0], reg [W:0].
+        " Remove whitespace before '[' generally, then restore exactly one
+        " space only for an unsigned or signed reg token immediately before it.
+        let l:type_part = substitute(l:type_part, '\s*\[', '[', 'g')
+        let l:type_part = substitute(l:type_part, '\<reg\>\[', 'reg [', 'g')
+
+        " Direction spacing is intentionally literal and independent of type.
+        if l:direction ==# 'output'
+            let l:dir_gap = ' '
+        else
+            let l:dir_gap = '  '
         endif
-        let l:prefix = substitute(l:prefix, '\s\+$', '', '')
+        let l:decl = l:indent . l:direction . l:dir_gap . l:type_part
 
         let l:entries[string(l:i)] = {
-                    \ 'prefix': l:prefix,
+                    \ 'decl': l:decl,
                     \ 'name': l:name,
                     \ 'comma': l:has_comma,
                     \ 'comment': l:comment
                     \ }
-        let l:max_prefix = max([l:max_prefix, strlen(l:prefix)])
+        let l:max_decl_len = max([l:max_decl_len, strlen(l:decl)])
         let l:max_name = max([l:max_name, strlen(l:name)])
     endfor
 
@@ -788,32 +982,26 @@ function! s:FormatPortLines(lines) abort
         return copy(a:lines)
     endif
 
-    let l:name_col = l:max_prefix + 1
+    " Keep port names vertically aligned, without aligning '[' columns.
+    let l:name_col = l:max_decl_len + 1
     let l:comma_col = l:name_col + l:max_name + 1
     let l:comment_col = l:comma_col + 2
     let l:out = copy(a:lines)
 
     for l:key in keys(l:entries)
         let l:e = l:entries[l:key]
-        let l:line = l:e.prefix
-                    \ . repeat(' ', max([1, l:name_col - strlen(l:e.prefix)]))
-                    \ . l:e.name
+        let l:line = l:e.decl . repeat(' ', max([1, l:name_col - strlen(l:e.decl)])) . l:e.name
 
         if l:e.comma
             let l:line .= repeat(' ', max([1, l:comma_col - strlen(l:line)])) . ','
         endif
-
         if !empty(l:e.comment)
-            let l:line .= repeat(' ', max([1, l:comment_col - strlen(l:line)]))
-                    \ . l:e.comment
+            let l:line .= repeat(' ', max([1, l:comment_col - strlen(l:line)])) . l:e.comment
         endif
-
         let l:out[str2nr(l:key)] = l:line
     endfor
-
     return l:out
 endfunction
-
 
 function! s:PathsCompatible(path_a, path_b) abort
     for l:a in a:path_a
@@ -824,6 +1012,19 @@ function! s:PathsCompatible(path_a, path_b) abort
         endfor
     endfor
     return 1
+endfunction
+
+function! s:EnsureTrailingPortComma(line) abort
+    if a:line =~ ',\s*\%(//.*\)\?$'
+        return a:line
+    endif
+    let l:comment_pos = match(a:line, '//')
+    if l:comment_pos >= 0
+        let l:before = substitute(strpart(a:line, 0, l:comment_pos), '\s\+$', '', '')
+        let l:after = strpart(a:line, l:comment_pos)
+        return l:before . ',' . (empty(l:after) ? '' : ' ' . l:after)
+    endif
+    return substitute(a:line, '\s\+$', '', '') . ','
 endfunction
 
 function! s:RemoveTrailingPortComma(line) abort

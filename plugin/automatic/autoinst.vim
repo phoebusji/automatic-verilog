@@ -1217,7 +1217,7 @@ endfunction
 "       .signal_name   (signal_name[width1:width2]      ), //io_dir
 "---------------------------------------------------
 function s:DrawIO(io_seqs,io_list,chg_io_names,tcmt_names)
-    let prefix = s:st_prefix.repeat(' ',4)
+    let prefix = s:st_prefix
     let io_list = copy(a:io_list)
     let chg_io_names = copy(a:chg_io_names)
     let tcmt_names = copy(a:tcmt_names)
