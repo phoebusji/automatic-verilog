@@ -791,69 +791,86 @@ endfunction
 "   decl_reg = [m,n]
 "   auto_reg = [a,qqq,creg]
 "---------------------------------------------------
+"Parse names from one-line reg/wire/logic declarations.
+"Accept both the plugin's generated formatting and conventional Verilog forms:
+"   wire[31:0] data;
+"   wire signed[7:0] data;
+"   reg [31:0] data;
+"   reg signed[7:0] data;
+"   logic[7:0] data;
+"   logic signed[7:0] data;
+function! s:AutoDefParseDeclNames(line,kind) abort
+    let l:line = substitute(a:line, '//.*$', '', '')
+    let l:line = substitute(l:line, '/\*.\{-}\*/', '', 'g')
+
+    if a:kind ==# 'reg'
+        let l:type_pattern = '\%(reg\|logic\)'
+    elseif a:kind ==# 'wire'
+        let l:type_pattern = '\%(wire\|logic\)'
+    else
+        return []
+    endif
+
+    if l:line !~ '^\s*' . l:type_pattern . '\>'
+        return []
+    endif
+
+    "Remove declaration type, signedness and the packed dimension. Whitespace
+    "before '[' is optional, matching the exact AUTODEF output format.
+    let l:names = substitute(l:line, '^\s*' . l:type_pattern . '\>', '', '')
+    let l:names = substitute(l:names, '^\s*\%(signed\|unsigned\)\>', '', '')
+    let l:names = substitute(l:names, '^\s*\[.\{-}\]\s*', '', '')
+    let l:names = substitute(l:names, ';.*$', '', '')
+    let l:names = substitute(l:names, '=.*$', '', '')
+
+    let l:result = []
+    for l:segment in split(l:names, ',')
+        "The first identifier in each declarator is the declared signal name;
+        "any unpacked array dimension follows it and is therefore ignored.
+        let l:name = matchstr(l:segment, '\h\w*')
+        if !empty(l:name) && index(l:result, l:name) < 0
+            call add(l:result, l:name)
+        endif
+    endfor
+    return l:result
+endfunction
+
 function s:GetDeclReg(lines)
     let decl_reg = []
     let auto_reg = []
     let idx = 1
 
-    while idx < len(a:lines)
+    while idx <= len(a:lines)
         "skip comment line
         let idx = g:AutoVerilog_SkipCommentLine(2,idx,a:lines)
-        if idx == -1
-            echohl ErrorMsg | echo "Error when SkipCommentLine! return -1"| echohl None
+        if idx < 1 || idx > len(a:lines)
+            break
         endif
         let line = a:lines[idx-1]
 
-        "comment detect,judege if it's start
-        if line =~ '\/\/.*$'
-            if line =~ '\/\/Start of automatic reg'
-                "start of autoreg
-                while 1
-                    let idx = idx + 1
-                    let line = getline(idx)
-                    "end of autoreg
-                    if line =~ '\/\/End of automatic reg'
-                        break
-                    "abnormal end
-                    elseif line =~ 'endmodule' || idx == line('$')
-                        echohl ErrorMsg | echo "Error running GetDeclReg! Get //Start of automatic reg but abonormally quit!"| echohl None
-                        break
-                    "middle
-                    elseif line =~ '^\s*reg'
-                        let name = matchstr(line,'^\s*reg\s\+\(\[.*\]\)\?\s*\zs\w\+\ze')
-                        call add(auto_reg,name)
-                    endif
-                endwhile
-            else
-                "delete comment
-                let line = substitute(line,'\/\/.*$','','')
-            endif
+        "Collect the previous AUTOREG declarations as the update baseline.
+        if line =~ '//Start of automatic reg'
+            while 1
+                let idx += 1
+                if idx > len(a:lines)
+                    echohl ErrorMsg | echo "Error running GetDeclReg! Get //Start of automatic reg but abnormally quit!" | echohl None
+                    break
+                endif
+                let line = a:lines[idx-1]
+                if line =~ '//End of automatic reg'
+                    break
+                elseif !empty(s:AutoDefParseDeclNames(line,'reg'))
+                    call extend(auto_reg, s:AutoDefParseDeclNames(line,'reg'))
+                endif
+            endwhile
+        else
+            call extend(decl_reg, s:AutoDefParseDeclNames(line,'reg'))
         endif
 
-        "match reg[1:0]a; or reg b;
-        let reg_pattern = '^\s*reg\s*\(\[.\{-\}\]\)\s*.\{-\}\s*;\s*'.'\|'.'^\s*reg\s\+.\{-\}\s*;\s*'
-        let match_pattern = '^\s*reg\s*\(\[.\{-\}\]\)\s*\zs.\{-\}\ze\s*;\s*'.'\|'.'^\s*reg\s\+\zs.\{-\}\ze\s*;\s*'
-
-        while line =~ reg_pattern
-            "delete abnormal
-            if line =~ '\<signed\>\|\<unsigned\>'
-                let line = substitute(line,'\<signed\>\|\<unsigned\>','','')
-            endif
-            let names = matchstr(line,match_pattern)
-            "in case style of reg a = {b,c,d};
-            let names = substitute(names,'\(\/\/\)\@<!=.*$','','')
-            "in case style of reg [1:0] a,b,c;
-            for name in split(names,',')
-                let name = matchstr(name,'\w\+')
-                call add(decl_reg,name)
-            endfor
-            let line = substitute(line,reg_pattern,'','')
-        endwhile
-
-        let idx = idx + 1
+        let idx += 1
     endwhile
 
-    return [decl_reg,auto_reg] 
+    return [decl_reg,auto_reg]
 endfunction
 "}}}2
 
@@ -1745,64 +1762,37 @@ function s:GetDeclWire(lines)
     let auto_wire = []
     let idx = 1
 
-    while idx < len(a:lines)
+    while idx <= len(a:lines)
         "skip comment line
         let idx = g:AutoVerilog_SkipCommentLine(2,idx,a:lines)
-        if idx == -1
-            echohl ErrorMsg | echo "Error when SkipCommentLine! return -1"| echohl None
+        if idx < 1 || idx > len(a:lines)
+            break
         endif
         let line = a:lines[idx-1]
 
-        "comment detect,judege if it's start
-        if line =~ '\/\/.*$'
-            if line =~ '\/\/Start of automatic wire'
-                "start of autowire
-                while 1
-                    let idx = idx + 1
-                    let line = getline(idx)
-                    "end of autowire
-                    if line =~ '\/\/End of automatic wire'
-                        break
-                    "abnormal end
-                    elseif line =~ 'endmodule' || idx == line('$')
-                        echohl ErrorMsg | echo "Error running GetDeclWire! Get //Start of automatic wire but abonormally quit!"| echohl None
-                        break
-                    "middle
-                    elseif line =~ '^\s*wire'
-                        let name = matchstr(line,'^\s*wire\s\+\(\[.*\]\)\?\s*\zs\w\+\ze')
-                        call add(auto_wire,name)
-                    endif
-                endwhile
-            else
-                "delete comment
-                let line = substitute(line,'\/\/.*$','','')
-            endif
+        "Collect the previous AUTOWIRE declarations as the update baseline.
+        if line =~ '//Start of automatic wire'
+            while 1
+                let idx += 1
+                if idx > len(a:lines)
+                    echohl ErrorMsg | echo "Error running GetDeclWire! Get //Start of automatic wire but abnormally quit!" | echohl None
+                    break
+                endif
+                let line = a:lines[idx-1]
+                if line =~ '//End of automatic wire'
+                    break
+                elseif !empty(s:AutoDefParseDeclNames(line,'wire'))
+                    call extend(auto_wire, s:AutoDefParseDeclNames(line,'wire'))
+                endif
+            endwhile
+        else
+            call extend(decl_wire, s:AutoDefParseDeclNames(line,'wire'))
         endif
 
-        "match wire[1:0]a; or wire b;
-        let wire_pattern = '^\s*wire\s*\(\[.\{-\}\]\)\s*.\{-\}\s*;\s*'.'\|'.'^\s*wire\s\+.\{-\}\s*;\s*'
-        let match_pattern = '^\s*wire\s*\(\[.\{-\}\]\)\s*\zs.\{-\}\ze\s*;\s*'.'\|'.'^\s*wire\s\+\zs.\{-\}\ze\s*;\s*'
-
-        while line =~ wire_pattern
-            "delete abnormal
-            if line =~ '\<signed\>\|\<unsigned\>'
-                let line = substitute(line,'\<signed\>\|\<unsigned\>','','')
-            endif
-            let names = matchstr(line,match_pattern)
-            "in case style of wire a = {b,c,d};
-            let names = substitute(names,'\(\/\/\)\@<!=.*$','','')
-            "in case style of wire [1:0] a,b,c;
-            for name in split(names,',')
-                let name = matchstr(name,'\w\+')
-                call add(decl_wire,name)
-            endfor
-            let line = substitute(line,wire_pattern,'','')
-        endwhile
-
-        let idx = idx + 1
+        let idx += 1
     endwhile
 
-    return [decl_wire,auto_wire] 
+    return [decl_wire,auto_wire]
 endfunction
 "}}}2
 
@@ -2242,7 +2232,7 @@ endfunction
 " Output:
 "   line after move
 "---------------------------------------------------
-function s:DefMove() 
+function s:DefMove()
     let lines = getline(1,line('$'))
     let [keep_reg_list,upd_reg_list] = s:GetDeclReg(lines)
     let [keep_wire_list,upd_wire_list] = s:GetDeclWire(lines)
@@ -2250,45 +2240,52 @@ function s:DefMove()
     let orig_col = col('.')
     let idx = 0
     let keep_lines = []
-    "mark all definie outside automatic define
+
+    "Mark manual declarations for relocation. Use the same parser as GetDeclReg
+    "and GetDeclWire so no-space packed ranges and signed logic are handled.
     while idx < len(lines)
-        let idx = idx + 1
-        let idx = g:AutoVerilog_SkipCommentLine(2,idx,lines)  "skip pair comment line
-        if idx == -1
-            echohl ErrorMsg | echo "Error when SkipCommentLine! return -1"| echohl None
-        endif
+        let idx += 1
         let line = lines[idx-1]
-        let orig_line = line
-        if line =~ '\<signed\>\|\<unsigned\>'
-            let line = substitute(line,'\<signed\>\|\<unsigned\>','','')
-        elseif line =~ '\/\/.*$'
-            let line = substitute(line,'\/\/.*$','','')
+        let reg_names = s:AutoDefParseDeclNames(line,'reg')
+        let wire_names = s:AutoDefParseDeclNames(line,'wire')
+        let tags = []
+
+        for name in reg_names
+            let name_idx = index(keep_reg_list,name)
+            if name_idx >= 0
+                call remove(keep_reg_list,name_idx)
+                if index(tags,'//keep_reg') < 0
+                    call add(tags,'//keep_reg')
+                endif
+            endif
+        endfor
+        for name in wire_names
+            let name_idx = index(keep_wire_list,name)
+            if name_idx >= 0
+                call remove(keep_wire_list,name_idx)
+                if index(tags,'//keep_wire') < 0
+                    call add(tags,'//keep_wire')
+                endif
+            endif
+        endfor
+
+        if !empty(tags)
+            call add(keep_lines,line)
+            "Place the internal marker before any pre-existing // comment.
+            let code = substitute(line,'\s*//.*$','','')
+            let comment = strpart(line,strlen(code))
+            call setline(idx,code.' '.join(tags,' ').comment)
         endif
-        for reg in keep_reg_list
-            if line !~ '^\s*\/\/' && line =~ '^\s*reg\s\+\(\[.\{-\}\]\)\?\s*'.'\<'.reg.'\>'
-                call add(keep_lines,orig_line)
-                call remove(keep_reg_list,index(keep_reg_list,reg))
-                execute ':'.idx.'normal A//keep_reg'
-                break
-            endif
-        endfor
-        for wire in keep_wire_list
-            if line !~ '^\s*\/\/' && line =~ '^\s*wire\s\+\(\[.\{-\}\]\)\?\s*'.'\<'.wire.'\>'
-                call add(keep_lines,orig_line)
-                call remove(keep_wire_list,index(keep_wire_list,wire))
-                execute ':'.idx.'normal A//keep_wire'
-                break
-            endif
-        endfor
     endwhile
+
     call cursor(orig_idx,orig_col)
-    "append all define
+    "append all declarations
     call cursor(1,1)
-    call search('\/\/End of automatic define','W')
+    call search('//End of automatic define','W')
     call append(line('.'),keep_lines)
-    "delete all scattered define
-    execute ':silent! '.'g/^\s*reg.*\/\/keep_reg/d'
-    execute ':silent! '.'g/^\s*wire.*\/\/keep_wire/d'
+    "delete all scattered declarations (including logic declarations)
+    execute ':silent! g/^\s*\%(reg\|logic\).*\/\/keep_reg/d'
+    execute ':silent! g/^\s*\%(wire\|logic\).*\/\/keep_wire/d'
     "cursor back
     call cursor(1,1)
     call search('\/\*autodef\*\/','W')
