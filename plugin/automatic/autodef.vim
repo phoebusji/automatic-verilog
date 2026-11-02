@@ -1358,6 +1358,97 @@ function s:GetaWire(lines)
 endfunction
 "}}}2
 
+"Update the active preprocessor branch while scanning the parent module.
+"The path is a list of {start, branch} frames and is attached to each
+"instance connection at the location where that connection appears.
+function s:AutoDefUpdateIfdefPath(path,line)
+    let path = deepcopy(a:path)
+    let directive_line = substitute(a:line, '\/\/.*$', '', '')
+    let directive = matchstr(directive_line, '^\s*`\%(ifdef\|ifndef\|elsif\|else\|endif\)\>.*$')
+    if directive ==# ''
+        return path
+    endif
+
+    let directive = substitute(directive, '^\s*', '', '')
+    if directive =~# '^`\%(ifdef\|ifndef\)\>'
+        call add(path, {'start': directive, 'branch': ''})
+    elseif directive =~# '^`\%(elsif\|else\)\>'
+        if !empty(path)
+            let path[len(path)-1].branch = directive
+        endif
+    elseif directive =~# '^`endif\>'
+        if !empty(path)
+            call remove(path, len(path)-1)
+        endif
+    endif
+
+    return path
+endfunction
+
+"Build the conditional path for every line in the parent source. Using an
+"absolute line map avoids scanning an instance's earlier lines twice when
+"GetInstModuleName() rewinds from a port connection to the instance header.
+function s:AutoDefGetIfdefPathByLine(lines)
+    let path = []
+    let path_by_line = {}
+    let line_nr = 0
+    for line in a:lines
+        let line_nr += 1
+        let path = s:AutoDefUpdateIfdefPath(path,line)
+        let path_by_line[line_nr] = deepcopy(path)
+    endfor
+    return path_by_line
+endfunction
+
+"Switch emitted AUTOWIRE declarations between conditional port paths.
+function s:AutoDefDrawIfdefTransition(lines,current_path,target_path,prefix)
+    let common = 0
+    while common < len(a:current_path) && common < len(a:target_path)
+        if a:current_path[common].start ==# a:target_path[common].start
+            let common += 1
+        else
+            break
+        endif
+    endwhile
+
+    "Close frames that are no longer active, from inner to outer.
+    let idx = len(a:current_path) - 1
+    while idx >= common
+        call add(a:lines, a:prefix.'`endif')
+        let idx -= 1
+    endwhile
+
+    let active_path = []
+    let idx = 0
+    while idx < common
+        let old_branch = a:current_path[idx].branch
+        let new_branch = a:target_path[idx].branch
+        if old_branch !=# new_branch
+            if new_branch ==# ''
+                "Return from an else/elsif branch by closing and reopening.
+                call add(a:lines, a:prefix.'`endif')
+                call add(a:lines, a:prefix.substitute(a:target_path[idx].start, '^\s*', '', ''))
+            else
+                call add(a:lines, a:prefix.substitute(new_branch, '^\s*', '', ''))
+            endif
+        endif
+        call add(active_path, deepcopy(a:target_path[idx]))
+        let idx += 1
+    endwhile
+
+    "Open newly entered frames.
+    while idx < len(a:target_path)
+        call add(a:lines, a:prefix.substitute(a:target_path[idx].start, '^\s*', '', ''))
+        if a:target_path[idx].branch !=# ''
+            call add(a:lines, a:prefix.substitute(a:target_path[idx].branch, '^\s*', '', ''))
+        endif
+        call add(active_path, deepcopy(a:target_path[idx]))
+        let idx += 1
+    endwhile
+
+    return active_path
+endfunction
+
 "GetiWire 获取inst类型wire{{{2
 "--------------------------------------------------
 " Function: GetiWire
@@ -1394,6 +1485,9 @@ function s:GetiWire(lines,files,modules,reg_width_names,decl_reg,io_names,reg_wi
 
     "Delete Inst Parameter lines
     let lines = s:GetiWire_DelPara(a:lines)
+    "Track parent-side `ifdef context by absolute line number. This is
+    "important because instance parsing rewinds over already scanned lines.
+    let parent_ifdef_path_by_line = s:AutoDefGetIfdefPathByLine(lines)
 
     let idx = 0
     let seq = 0
@@ -1423,6 +1517,7 @@ function s:GetiWire(lines,files,modules,reg_width_names,decl_reg,io_names,reg_wi
         "Get module_name & inst_io_names{{{3
         "find instance line e.g. .inst_a(conn_b),
         let idx2 = 0
+        let inst_io_names = {}
         if line =~ '\.\s*\w\+\s*(.\{-\})'
             "
             "Put cursor to /*autoinst*/ line
@@ -1466,6 +1561,7 @@ function s:GetiWire(lines,files,modules,reg_width_names,decl_reg,io_names,reg_wi
                     let seq = seq + 1
                     let port = matchstr(line,'\.\s*\zs\w\+\ze\s*([^.]*)')
                     let conn = matchstr(line,'\.\s*\w\+\s*(\s*\zs[^.]*\ze\s*)')    "connection
+                    let port_ifdef_path = has_key(parent_ifdef_path_by_line,idx) ? copy(parent_ifdef_path_by_line[idx]) : []
                     "there might exist double bracket for this kind of match,delete them
                     "e.g. .do(r_tx_data_12)); match conn will be r_tx_data_12)
                     while conn =~ ')\s*$'
@@ -1580,6 +1676,7 @@ function s:GetiWire(lines,files,modules,reg_width_names,decl_reg,io_names,reg_wi
                         "inst wire
                         "       .port_a (port_a_o [4:0]),
                         let had_previous = has_key(width_names,conn_name)
+                        let ifdef_path = copy(port_ifdef_path)
                         if had_previous
                             let old_value = width_names[conn_name]
                             let seqs = add(old_value[0],seq)
@@ -1587,6 +1684,14 @@ function s:GetiWire(lines,files,modules,reg_width_names,decl_reg,io_names,reg_wi
                             let module_names = add(old_value[3],module_name)
                             let conn_widths = add(old_value[4],conn_width)
                             let signed_flag = (len(old_value) > 7 && old_value[7] == 1) || port_signed ? 1 : 0
+                            let old_ifdef_path = len(old_value) > 8 ? old_value[8] : []
+                            "If a parent net is used in different branches,
+                            "declare it unconditionally rather than only in one branch.
+                            if old_ifdef_path !=# ifdef_path
+                                let ifdef_path = []
+                            else
+                                let ifdef_path = copy(old_ifdef_path)
+                            endif
                         else
                             let seqs = [seq]
                             let inst_lines = [inst_line]
@@ -1610,7 +1715,7 @@ function s:GetiWire(lines,files,modules,reg_width_names,decl_reg,io_names,reg_wi
                                 "   width_names
                                 "    0     1            2           3             4            5         6      7
                                 "   [seqs, signal_name, lines,      module_names, conn_widths, resolved, type, signed]
-                        let value = [seqs, conn_name,   inst_lines, module_names, conn_widths, resolved, stype, signed_flag]
+                        let value = [seqs, conn_name,   inst_lines, module_names, conn_widths, resolved, stype, signed_flag, ifdef_path]
                         
                         call extend(width_names,{conn_name : value})
                         "echo 'name = '.conn_name.join(conn_widths)
@@ -2028,8 +2133,11 @@ function s:DrawWire(wire_names,wire_list)
     "}}}4
 
     "draw iwire{{{4
+    let active_ifdef_path = []
     for seq in sort(map(keys(iwire_seqs),'str2nr(v:val)'),g:atv_sort_funcref)
         let value = iwire_seqs[seq]
+        let target_ifdef_path = len(value) > 7 ? value[7] : []
+        let active_ifdef_path = s:AutoDefDrawIfdefTransition(lines,active_ifdef_path,target_ifdef_path,prefix)
         "Format wire sequences
         "    0     1             2      3            4         5
         "   [type, specify type, width, signal_name, resolved, seq]
@@ -2096,6 +2204,8 @@ function s:DrawWire(wire_names,wire_list)
         call add(lines,line)
 
     endfor
+    "Close the final conditional port branch before WIRE_DEL comments.
+    call s:AutoDefDrawIfdefTransition(lines,active_ifdef_path,[],prefix)
     "}}}4
 
     if wire_list == []
@@ -3160,12 +3270,17 @@ function s:GetAllSig(lines,mode)
             if awire_resolved == 1 && iwire_resolved == 0
                 "Keep AWIRE width, but preserve signedness from connected child ports.
                 let value = copy(awire_value)
+                let ifdef_path = len(iwire_value) > 8 ? copy(iwire_value[8]) : []
                 if len(value) < 7
                     call add(value,0)
                 endif
                 if len(iwire_value) > 7 && iwire_value[7] == 1
                     let value[6] = 1
                 endif
+                if len(value) < 8
+                    call add(value,[])
+                endif
+                let value[7] = ifdef_path
                 call extend(sig_names,{name : value},'force')
                 call extend(wire_names,{name : value},'force')
             "use iwire
@@ -3174,8 +3289,9 @@ function s:GetAllSig(lines,mode)
                 let conn_width = s:AutoDefSelectPreferredWidth(conn_widths)
                 let stype = iwire_value[6]
                 let signed_flag = len(iwire_value) > 7 && iwire_value[7] == 1 ? 1 : 0
+                let ifdef_path = len(iwire_value) > 8 ? copy(iwire_value[8]) : []
                 "   [type, specify type, width, signal_name, resolved, seq, signed]
-                let value = ['wire',stype,conn_width,name,0,iwire_seqs[0],signed_flag]
+                let value = ['wire',stype,conn_width,name,0,iwire_seqs[0],signed_flag,ifdef_path]
                 call extend(sig_names,{name : value})
                 call extend(wire_names,{name : value})
             endif
@@ -3185,8 +3301,9 @@ function s:GetAllSig(lines,mode)
             let conn_width = s:AutoDefSelectPreferredWidth(conn_widths)
             let stype = iwire_value[6]
             let signed_flag = len(iwire_value) > 7 && iwire_value[7] == 1 ? 1 : 0
+            let ifdef_path = len(iwire_value) > 8 ? copy(iwire_value[8]) : []
             "   [type, specify type, width, signal_name, resolved, seq, signed]
-            let value = ['wire',stype,conn_width,name,iwire_resolved,iwire_seqs[0],signed_flag]
+            let value = ['wire',stype,conn_width,name,iwire_resolved,iwire_seqs[0],signed_flag,ifdef_path]
             call extend(sig_names,{name : value})
             call extend(wire_names,{name : value})
         endif
