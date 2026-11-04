@@ -47,6 +47,21 @@ endif
 
 let s:autop_marker_pat = '/\*\+\s*AUTOPORT\s*(\s*\h\w*\s*)\s*\*\+/'
 
+" AutoPort Config 自动端口格式配置
+"   st_pos   : generated port declaration start column
+"   name_pos : port-name start column
+"   sym_pos  : trailing comma column
+let g:_ATV_AUTOPORT_DEFAULTS = {
+            \ 'st_pos':      4,
+            \ 'name_pos':    64,
+            \ 'sym_pos':     128
+            \ }
+for s:key in keys(g:_ATV_AUTOPORT_DEFAULTS)
+    if !exists('g:atv_autoport_' . s:key)
+        let g:atv_autoport_{s:key} = copy(g:_ATV_AUTOPORT_DEFAULTS[s:key])
+    endif
+endfor
+
 function! g:AutoPort(mode) abort
     if a:mode != 0 && a:mode != 1
         echohl ErrorMsg | echomsg 'AutoPort: mode must be 0 or 1' | echohl None
@@ -434,10 +449,6 @@ function! s:AutoPortAt(marker_line) abort
         endif
     endfor
 
-    " Align direction/type/width/name/comma/comment columns in the generated
-    " region only. Source order and preprocessor lines are unchanged.
-    let l:new_body = s:FormatPortLines(l:new_body)
-
     " Add PORT_NEW to newly generated port declarations. Only do this when an
     " old expansion contained at least one port, matching AUTOINST's behavior
     " for an initially empty instance-port list.
@@ -450,11 +461,15 @@ function! s:AutoPortAt(marker_line) abort
         endfor
     endif
 
+    " Align direction/type/width/name/comma/comment columns in the generated
+    " region only. Source order and preprocessor lines are unchanged.
+    let l:new_body = s:FormatPortLines(l:new_body)
+
     " Add one PORT_DEL record for each former generated port that no longer
     " exists in the child module's declaration. Deleted records are comments,
     " so they disappear naturally on the next update, just like AUTOINST.
     if !empty(l:old_port_name_set)
-        let l:port_indent = matchstr(l:marker_text, '^\s*') . '    '
+        let l:port_indent = repeat(' ', max([0, g:atv_autoport_st_pos]))
         if !empty(l:new_body)
             for l:i in range(0, len(l:new_body) - 1)
                 if !empty(s:PortNameFromLine(l:new_body[l:i]))
@@ -928,10 +943,10 @@ endfunction
 " Align generated port declaration columns without reordering any lines.
 "
 " Format policy:
-"   input  wire ..., output wire/reg ..., inout  wire ...
-"   non-signed packed-width '[' characters share one column;
-"   signed declarations are excluded from '[' alignment.
-"   port names, commas, and comments are aligned without reordering lines.
+"   st_pos controls the declaration indentation.
+"   name_pos controls the minimum port-name column.
+"   sym_pos controls the minimum trailing-comma column.
+"   Longer declarations/names extend the following columns as needed.
 "   comments and all preprocessor/non-port lines are retained.
 " -----------------------------------------------------------------------------
 function! s:FormatPortLines(lines) abort
@@ -957,14 +972,14 @@ function! s:FormatPortLines(lines) abort
         let l:has_comma = l:clean =~ ',\s*$'
         let l:code = l:has_comma ? substitute(l:clean, ',\s*$', '', '') : l:clean
         let l:code = substitute(l:code, '\s\+$', '', '')
-        let l:indent = matchstr(l:code, '^\s*')
-        let l:after_indent = strpart(l:code, strlen(l:indent))
+        let l:source_indent = matchstr(l:code, '^\s*')
+        let l:after_indent = strpart(l:code, strlen(l:source_indent))
         let l:direction = matchstr(l:after_indent, '^\%(input\|output\|inout\)\>')
         if empty(l:direction)
             continue
         endif
 
-        let l:dir_end = strlen(l:indent) + strlen(l:direction)
+        let l:dir_end = strlen(l:source_indent) + strlen(l:direction)
         let l:name_pos = match(l:code, '\h\w*$')
         if l:name_pos < l:dir_end
             continue
@@ -988,7 +1003,8 @@ function! s:FormatPortLines(lines) abort
         else
             let l:dir_gap = '  '
         endif
-        let l:decl = l:indent . l:direction . l:dir_gap . l:type_part
+        let l:decl = repeat(' ', max([0, g:atv_autoport_st_pos]))
+                    \ . l:direction . l:dir_gap . l:type_part
 
         let l:entries[string(l:i)] = {
                     \ 'decl': l:decl,
@@ -1005,8 +1021,8 @@ function! s:FormatPortLines(lines) abort
     endif
 
     " Keep port names vertically aligned, without aligning '[' columns.
-    let l:name_col = l:max_decl_len + 1
-    let l:comma_col = l:name_col + l:max_name + 1
+    let l:name_col = max([l:max_decl_len + 1, g:atv_autoport_name_pos])
+    let l:comma_col = max([l:name_col + l:max_name + 1, g:atv_autoport_sym_pos])
     let l:comment_col = l:comma_col + 2
     let l:out = copy(a:lines)
 
@@ -1329,7 +1345,7 @@ function! s:AutoPortDuplicateComment(line) abort
     if empty(l:code)
         return ''
     endif
-    return matchstr(a:line, '^\s*') . '// AUTOPORT_DUPLICATE: ' . l:code
+    return repeat(' ', max([0, g:atv_autoport_st_pos])) . '// AUTOPORT_DUPLICATE: ' . l:code
 endfunction
 
 function! s:AutoPortHasLaterRegionPorts(boundary, header_close, conflicts, duplicates, body_start, body_end) abort
