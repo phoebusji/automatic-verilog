@@ -21,8 +21,13 @@
 "   - Does not modify AUTOINST implementation or generated instance wiring.
 "   - Copies source port lines in source order, retaining `ifdef/`else/`endif.
 "   - Uses one ANSI port declaration per source line (the usual RTL style).
-"   - For name-mismatch filtering, expand AUTOINST first so explicit .port(signal)
+"   - For connection analysis, expand AUTOINST first so explicit named-port
 "     connections are visible to this script.
+"   - Emits AUTOPORT_UNUSED comments for unused mismatched, open and missing
+"     named-port connections; repeated instances of the same child are not
+"     aggregated, and positional connection lists are not analyzed.
+"   - Removes standalone source comments and blank rows from the copied port
+"     list while retaining comments attached to port declarations.
 "   - Conflicting names are filtered from the generated region.
 " -----------------------------------------------------------------------------
 
@@ -324,48 +329,74 @@ function! s:AutoPortAt(marker_line) abort
     endfor
 
     let l:body_start = l:header_close_line + 1
-    let l:body_end = line('$')
-    " Stop at the end of the enclosing module, rather than considering later
-    " modules in the same file.
-    if l:mod_start > 0
-        for l:i in range(l:body_start, l:body_end)
-            if s:StripComments([getline(l:i)])[0] =~ '^\s*endmodule\>'
-                let l:body_end = l:i - 1
+    let l:body_end = l:body_start - 1
+    let l:body_raw_lines = []
+    let l:body_clean_lines = []
+
+    " Read and clean each parent-body line once, stopping at this module's
+    " endmodule. Reuse the cached lines for conflicts and signal-use analysis.
+    if l:body_start <= line('$')
+        for l:i in range(l:body_start, line('$'))
+            let l:raw_line = getline(l:i)
+            let l:clean_line = s:StripComments([l:raw_line])[0]
+            if l:mod_start > 0 && l:clean_line =~ '^\s*endmodule\>'
                 break
             endif
+            call add(l:body_raw_lines, l:raw_line)
+            call add(l:body_clean_lines, l:clean_line)
+            let l:body_end = l:i
         endfor
     endif
 
-    if l:body_start <= l:body_end
-        for l:i in range(l:body_start, l:body_end)
-            " Explicit declarations are conflicts as before.
-            for l:name in s:DeclaredNamesFromLine(getline(l:i))
-                let l:conflicts[l:name] = 1
-            endfor
-            " Also treat assignment LHS names as locally driven signals.
-            " This catches undeclared procedural variables such as:
-            "   rd_motion_tggl <= 'd0;
-            " which must not be regenerated as a parent input port.
-            for l:name in s:AssignedNamesFromLine(getline(l:i))
-                let l:conflicts[l:name] = 1
-            endfor
+    " AutoPortGetCodeText() is the expensive lexical pass. Share its result
+    " among duplicate detection, instance-connection parsing and usage index.
+    let l:body_code_text = s:AutoPortGetCodeText(l:body_raw_lines)
+
+    let l:body_declared_names = {}
+    let l:body_declared_counts = {}
+    for l:i in range(0, len(l:body_raw_lines) - 1)
+        " Explicit declarations are conflicts as before. Keep their names
+        " separately so an unused same-name wire/reg can be annotated.
+        let l:decl_clean = l:body_clean_lines[l:i]
+        let l:is_net_reg_decl = l:decl_clean =~# '^\s*\%(wire\|reg\|logic\|bit\|tri\|tri0\|tri1\|wand\|wor\)\>'
+        for l:name in s:DeclaredNamesFromLine(l:decl_clean, 1)
+            let l:conflicts[l:name] = 1
+            let l:body_declared_counts[l:name] = get(l:body_declared_counts, l:name, 0) + 1
+            if l:is_net_reg_decl
+                let l:body_declared_names[l:name] = 1
+            endif
         endfor
-    endif
+        " Also treat assignment LHS names as locally driven signals.
+        " This catches undeclared procedural variables such as:
+        "   rd_motion_tggl <= 'd0;
+        " which must not be regenerated as a parent input port.
+        for l:name in s:AssignedNamesFromLine(l:decl_clean, 1)
+            let l:conflicts[l:name] = 1
+        endfor
+    endfor
 
     " Scan every instance in the current module, including instances that do
     " not have an AUTOPORT marker. Conditional-compilation branches are all
     " scanned without trying to prove them mutually exclusive.
-    let l:duplicate_names = s:AutoPortFindDuplicateConnections(l:body_start, l:body_end)
+    let l:duplicate_names = s:AutoPortFindDuplicateConnections(l:body_start, l:body_end, l:body_code_text)
+
+    " Build the parent signal-usage index once. Every AUTOPORT candidate then
+    " performs constant-time dictionary lookups instead of rescanning the full
+    " parent module for each signal.
+    let l:signal_usage_index = s:AutoPortBuildSignalUsageIndex(
+                \ l:body_start, l:body_end, l:header_before, l:body_code_text, l:body_raw_lines, l:body_declared_counts)
 
     " Keep the parent/manual conflicts separately. Later-region comma planning
     " must apply each later child module's own mismatch set, not this marker's.
     let l:base_conflicts = copy(l:conflicts)
 
-    " If explicit named connections exist for instances of this child module,
-    " reject ports whose connection is not exactly the same simple identifier.
-    let l:mismatches = s:GetMismatchedConnections(l:module, l:body_start, l:body_end)
-    for l:name in keys(l:mismatches)
-        let l:conflicts[l:name] = 1
+    " Read the target instance's named-port connections. This also lets us
+    " distinguish an explicitly open connection from a missing named port.
+    let l:connections = s:GetInstancePortConnections(l:module, l:body_start, l:body_end, l:body_code_text)
+    for l:name in keys(l:connections.ports)
+        if l:connections.ports[l:name].kind !=# 'match'
+            let l:conflicts[l:name] = 1
+        endif
     endfor
 
     let l:new_body = []
@@ -384,23 +415,72 @@ function! s:AutoPortAt(marker_line) abort
         endif
 
         let l:pname = s:PortNameFromLine(l:clean)
-        if !empty(l:pname) && has_key(l:conflicts, l:pname)
-            " Drop a manually conflicting declaration, but keep every directive.
-            if l:is_endif && !empty(l:cond_stack)
-                call remove(l:cond_stack, -1)
-            endif
-            continue
-        endif
+        if !empty(l:pname)
+            let l:conn_info = get(l:connections.ports, l:pname, {})
 
-        if !empty(l:pname) && has_key(l:duplicate_names, l:pname)
-            " Keep duplicate candidates visible to the user, but never emit them
-            " as active parent-module ports. The same connection scan is used
-            " for every AUTOPORT marker, so the result is order-independent.
-            let l:duplicate_line = s:AutoPortDuplicateComment(l:raw)
-            if !empty(l:duplicate_line)
-                call add(l:new_body, l:duplicate_line)
+            " Case 3: the target instance explicitly writes .port().
+            if !empty(l:conn_info) && l:conn_info.kind ==# 'open'
+                call extend(l:new_body, s:AutoPortUnusedCommentLines(l:raw, ' (open)'))
+                if l:is_endif && !empty(l:cond_stack)
+                    call remove(l:cond_stack, -1)
+                endif
+                continue
             endif
-            continue
+
+            " Case 4: a recognized named-port list omits this child port.
+            " Do not infer missing ports from positional connection lists.
+            if l:connections.recognized && !l:connections.wildcard && empty(l:conn_info)
+                call extend(l:new_body, s:AutoPortUnusedCommentLines(l:raw, ' (missing)'))
+                if l:is_endif && !empty(l:cond_stack)
+                    call remove(l:cond_stack, -1)
+                endif
+                continue
+            endif
+
+            " Case 1: a different simple signal name is connected, but that
+            " signal has no use elsewhere in this parent module.
+            if !empty(l:conn_info) && l:conn_info.kind ==# 'mismatch'
+                if l:conn_info.conn =~# '^\h\w*$'
+                            \ && !s:AutoPortSignalHasOtherUse(l:signal_usage_index, l:conn_info.conn,
+                            \                                  get(l:conn_info, 'exclude', 1))
+                    call extend(l:new_body, s:AutoPortUnusedCommentLines(
+                                \ l:raw, ' -> ' . l:conn_info.conn))
+                endif
+                if l:is_endif && !empty(l:cond_stack)
+                    call remove(l:cond_stack, -1)
+                endif
+                continue
+            endif
+
+            " Case 2: a same-name wire/reg declaration already suppresses
+            " the generated port, and the signal has no other use.
+            " Keep the original conflict-before-duplicate priority.
+            if has_key(l:conflicts, l:pname)
+                let l:same_name_connected = (!empty(l:conn_info)
+                            \ && l:conn_info.kind ==# 'match') || l:connections.wildcard
+                if l:same_name_connected && has_key(l:body_declared_names, l:pname)
+                            \ && !s:AutoPortSignalHasOtherUse(l:signal_usage_index, l:pname,
+                            \                                  get(l:conn_info, 'exclude', 0))
+                    call extend(l:new_body, s:AutoPortUnusedCommentLines(l:raw, ''))
+                endif
+                if l:is_endif && !empty(l:cond_stack)
+                    call remove(l:cond_stack, -1)
+                endif
+                continue
+            endif
+
+            " Preserve the existing duplicate-comment behavior after ordinary
+            " parent conflicts have been checked.
+            if has_key(l:duplicate_names, l:pname)
+                let l:duplicate_line = s:AutoPortDuplicateComment(l:raw)
+                if !empty(l:duplicate_line)
+                    call add(l:new_body, l:duplicate_line)
+                endif
+                if l:is_endif && !empty(l:cond_stack)
+                    call remove(l:cond_stack, -1)
+                endif
+                continue
+            endif
         endif
 
         let l:out = l:raw
@@ -427,7 +507,7 @@ function! s:AutoPortAt(marker_line) abort
     " one active port. Do not infer this from stale text left by a previous run.
     let l:has_later_region_ports = s:AutoPortHasLaterRegionPorts(
                 \ l:boundary, l:header_close, l:base_conflicts, l:duplicate_names,
-                \ l:body_start, l:body_end)
+                \ l:body_start, l:body_end, l:body_code_text)
 
     " Remove/add commas from every possible last port in each preprocessor
     " branch, taking later AUTOPORT regions into account.
@@ -488,7 +568,7 @@ function! s:AutoPortAt(marker_line) abort
     " Replace only this marker's region. If another AUTOPORT marker follows in
     " the same module header, leave that marker and its expansion untouched.
     let l:prefix = strpart(l:marker_text, 0, l:marker_end)
-    if empty(l:port_records)
+    if empty(l:port_records) && !l:has_later_region_ports
         for l:prior in reverse(copy(l:header_before))
             let l:prior_clean = s:StripComments([l:prior])[0]
             if !empty(s:PortNameFromLine(l:prior_clean))
@@ -646,7 +726,65 @@ function! s:GetModulePortBody(lines, module) abort
             break
         endif
     endfor
-    return l:seen_port ? l:body_lines : []
+    return l:seen_port ? s:AutoPortCleanPortBody(l:body_lines) : []
+endfunction
+
+function! s:AutoPortCleanPortBody(lines) abort
+    " Remove blank rows and rows containing only comments. Preserve comments
+    " attached to code, including a multi-line block comment opened inline.
+    let l:out = []
+    let l:block = 0
+    let l:block_keep = 0
+
+    for l:raw in a:lines
+        let l:keep_line = 0
+        let l:i = 0
+        let l:n = strlen(l:raw)
+
+        if l:block && l:block_keep
+            let l:keep_line = 1
+        endif
+
+        while l:i < l:n
+            let l:two = strpart(l:raw, l:i, 2)
+            let l:ch = strpart(l:raw, l:i, 1)
+
+            if l:block
+                if l:two ==# '*/'
+                    let l:block = 0
+                    let l:block_keep = 0
+                    let l:i += 2
+                    continue
+                endif
+                let l:i += 1
+                continue
+            endif
+
+            if l:two ==# '//'
+                " A line comment is retained only when code preceded it.
+                break
+            elseif l:two ==# '/*'
+                if strpart(l:raw, 0, l:i) =~# '\S'
+                    let l:keep_line = 1
+                    let l:block_keep = 1
+                else
+                    let l:block_keep = 0
+                endif
+                let l:block = 1
+                let l:i += 2
+                continue
+            elseif l:ch =~# '\S'
+                let l:keep_line = 1
+            endif
+            let l:i += 1
+        endwhile
+
+        if l:keep_line
+            call add(l:out, l:raw)
+        endif
+    endfor
+
+    return l:out
 endfunction
 
 function! s:FindNextCodeParen(text, start) abort
@@ -818,8 +956,8 @@ function! s:PortNameFromLine(line) abort
     return substitute(l:name, '\s', '', 'g')
 endfunction
 
-function! s:DeclaredNamesFromLine(line) abort
-    let l:clean = s:StripComments([a:line])[0]
+function! s:DeclaredNamesFromLine(line, ...) abort
+    let l:clean = a:0 >= 1 && a:1 ? a:line : s:StripComments([a:line])[0]
     if l:clean =~ '^\s*`' || l:clean !~ '^\s*\(input\|output\|inout\|wire\|reg\|logic\|bit\|tri\|tri0\|tri1\|wand\|wor\|integer\|time\|genvar\|parameter\|localparam\|event\)\>'
         return []
     endif
@@ -841,7 +979,7 @@ function! s:DeclaredNamesFromLine(line) abort
     return l:names
 endfunction
 
-function! s:AssignedNamesFromLine(line) abort
+function! s:AssignedNamesFromLine(line, ...) abort
     " Identify simple procedural/continuous assignment targets on a line.
     " Examples:
     "   rd_motion_tggl <= 'd0;
@@ -851,7 +989,7 @@ function! s:AssignedNamesFromLine(line) abort
     "   {valid, ready} <= 2'b0;
     " This is intentionally a lightweight line-oriented parser rather than
     " a complete Verilog grammar. Complex/multiline lvalues are not inferred.
-    let l:work = s:StripComments([a:line])[0]
+    let l:work = a:0 >= 1 && a:1 ? a:line : s:StripComments([a:line])[0]
     if l:work =~ '^\s*`'
         return []
     endif
@@ -1075,61 +1213,123 @@ function! s:RemoveTrailingPortComma(line) abort
     return strpart(a:line, 0, l:idx) . (empty(l:tail) ? '' : ' ' . l:tail)
 endfunction
 
-function! s:GetMismatchedConnections(module, body_start, body_end) abort
-    let l:bad = {}
+function! s:GetInstancePortConnections(module, body_start, body_end, ...) abort
+    " Parse the first named-port instance of a child module in the parent body.
+    " Multiple instances are intentionally outside the current AUTOPORT policy.
+    let l:result = {'recognized': 0, 'wildcard': 0, 'ports': {}}
     if a:body_start > a:body_end
-        return l:bad
+        return l:result
     endif
-    let l:raw_lines = getline(a:body_start, a:body_end)
-    let l:text = join(s:StripComments(l:raw_lines), "\n")
+
+    let l:text = a:0 >= 1 ? a:1 : s:AutoPortGetCodeText(getline(a:body_start, a:body_end))
     let l:module_pat = '\<' . escape(a:module, '\') . '\>'
-    let l:search_from = 0
-    while 1
-        " Common form: child_module instance_name (...).
-        let l:inst_start = match(l:text, l:module_pat . '\s\+\h\w*\s*(', l:search_from)
-        if l:inst_start < 0
-            " Parameterized form: child_module #(...) instance_name (...).
-            let l:hash_start = match(l:text, l:module_pat . '\s*#\s*(', l:search_from)
-            if l:hash_start < 0
-                break
-            endif
-            let l:param_open = match(l:text, '(', l:hash_start)
-            let l:param_close = s:FindMatchingParen(l:text, l:param_open)
-            if l:param_close < 0 | break | endif
-            let l:after_param = l:param_close + 1
-            let l:inst_name_end = matchend(l:text, '\s*\h\w*\s*(', l:after_param)
-            if l:inst_name_end < 0
-                let l:search_from = l:param_close + 1
-                continue
-            endif
-            let l:port_open = match(l:text, '(', l:after_param)
-            let l:inst_start = l:hash_start
-        else
-            let l:port_open = match(l:text, '(', l:inst_start)
+    let l:plain_pat = l:module_pat . '\_s\+\h\w*\_s*('
+    let l:hash_pat = l:module_pat . '\_s*#\_s*('
+    let l:plain_pos = match(l:text, l:plain_pat)
+    let l:hash_pos = match(l:text, l:hash_pat)
+
+    if l:plain_pos < 0 && l:hash_pos < 0
+        return l:result
+    endif
+
+    if l:hash_pos >= 0 && (l:plain_pos < 0 || l:hash_pos < l:plain_pos)
+        let l:hash_tail = strpart(l:text, l:hash_pos)
+        let l:hash_end = matchend(l:hash_tail, '^' . l:hash_pat)
+        if l:hash_end <= 0
+            return l:result
         endif
-        let l:port_close = s:FindMatchingParen(l:text, l:port_open)
-        if l:port_close < 0
+        let l:param_open = l:hash_pos + l:hash_end - 1
+        let l:param_close = s:FindMatchingParen(l:text, l:param_open)
+        if l:param_close < 0
+            return l:result
+        endif
+        let l:instance_tail = strpart(l:text, l:param_close + 1)
+        let l:instance_end = matchend(l:instance_tail, '^\_s*\h\w*\_s*(')
+        if l:instance_end <= 0
+            return l:result
+        endif
+        let l:port_open = l:param_close + l:instance_end
+    else
+        let l:plain_tail = strpart(l:text, l:plain_pos)
+        let l:plain_end = matchend(l:plain_tail, '^' . l:plain_pat)
+        if l:plain_end <= 0
+            return l:result
+        endif
+        let l:port_open = l:plain_pos + l:plain_end - 1
+    endif
+
+    let l:port_close = s:FindMatchingParen(l:text, l:port_open)
+    if l:port_close < 0
+        return l:result
+    endif
+    let l:ports = strpart(l:text, l:port_open + 1, l:port_close - l:port_open - 1)
+    if l:ports =~# '^\_s*$'
+        " An explicit empty list means no named child ports were connected.
+        let l:result.recognized = 1
+        return l:result
+    endif
+
+    if l:ports =~# '\.\*'
+        let l:result.wildcard = 1
+    endif
+
+    " Positional connections cannot be mapped to child port names here.
+    if l:ports !~# '\.\h\w*'
+        return l:result
+    endif
+
+    let l:result.recognized = 1
+    let l:psearch = 0
+    while 1
+        let l:pstart = match(l:ports, '\.\h\w*', l:psearch)
+        if l:pstart < 0
             break
         endif
-        let l:ports = strpart(l:text, l:port_open + 1, l:port_close - l:port_open - 1)
-        let l:psearch = 0
-        while 1
-            let l:pstart = match(l:ports, '\.\h\w*\s*(', l:psearch)
-            if l:pstart < 0 | break | endif
-            let l:pname = matchstr(strpart(l:ports, l:pstart), '^\.\zs\h\w*')
-            let l:open_rel = match(l:ports, '(', l:pstart)
-            let l:conn_close = s:FindMatchingParen(l:ports, l:open_rel)
-            if l:conn_close < 0 | break | endif
-            let l:conn = strpart(l:ports, l:open_rel + 1, l:conn_close - l:open_rel - 1)
-            let l:conn = substitute(l:conn, '^\s*', '', '')
-            let l:conn = substitute(l:conn, '\s*$', '', '')
-            if l:conn !~ '^\h\w*$' || l:conn !=# l:pname
-                let l:bad[l:pname] = 1
-            endif
-            let l:psearch = l:conn_close + 1
-        endwhile
-        let l:search_from = l:port_close + 1
+        let l:pname = matchstr(strpart(l:ports, l:pstart), '^\.\zs\h\w*')
+        let l:after_name = l:pstart + 1 + strlen(l:pname)
+        let l:tail = strpart(l:ports, l:after_name)
+        let l:open_rel = match(l:tail, '^\_s*(')
+
+        if l:open_rel < 0
+            " SystemVerilog implicit named connection: .signal
+            let l:result.ports[l:pname] = {'kind': 'match', 'conn': l:pname, 'exclude': 1}
+            let l:psearch = l:after_name
+            continue
+        endif
+
+        let l:open_abs = l:after_name + match(l:tail, '(')
+        let l:conn_close = s:FindMatchingParen(l:ports, l:open_abs)
+        if l:conn_close < 0
+            break
+        endif
+        let l:conn = strpart(l:ports, l:open_abs + 1, l:conn_close - l:open_abs - 1)
+        let l:conn = substitute(l:conn, '^\s*', '', '')
+        let l:conn = substitute(l:conn, '\s*$', '', '')
+
+        if empty(l:conn)
+            let l:result.ports[l:pname] = {'kind': 'open', 'conn': '', 'exclude': 0}
+        elseif l:conn =~# '^\h\w*$' && l:conn ==# l:pname
+            " Exclude the actual signal occurrence here. The formal .port
+            " label is removed separately by the precomputed formal-pin-label index.
+            let l:result.ports[l:pname] = {'kind': 'match', 'conn': l:conn, 'exclude': 1}
+        else
+            let l:result.ports[l:pname] = {'kind': 'mismatch', 'conn': l:conn, 'exclude': 1}
+        endif
+        let l:psearch = l:conn_close + 1
     endwhile
+
+    return l:result
+endfunction
+
+function! s:GetMismatchedConnections(module, body_start, body_end) abort
+    " Compatibility helper: return all explicitly non-matching named ports.
+    let l:bad = {}
+    let l:connections = s:GetInstancePortConnections(a:module, a:body_start, a:body_end)
+    for l:name in keys(l:connections.ports)
+        if l:connections.ports[l:name].kind !=# 'match'
+            let l:bad[l:name] = 1
+        endif
+    endfor
     return l:bad
 endfunction
 
@@ -1267,14 +1467,13 @@ function! s:AutoPortCountInstancePortLists(text, port_open, counts) abort
     return l:scan_from
 endfunction
 
-function! s:AutoPortFindDuplicateConnections(body_start, body_end) abort
+function! s:AutoPortFindDuplicateConnections(body_start, body_end, ...) abort
     let l:duplicates = {}
     if a:body_start > a:body_end
         return l:duplicates
     endif
 
-    let l:raw_lines = getline(a:body_start, a:body_end)
-    let l:text = s:AutoPortGetCodeText(l:raw_lines)
+    let l:text = a:0 >= 1 ? a:1 : s:AutoPortGetCodeText(getline(a:body_start, a:body_end))
     let l:counts = {}
     let l:search_from = 0
     let l:plain_pat = '\<\h\w*\>\_s\+\h\w*\_s*('
@@ -1348,7 +1547,151 @@ function! s:AutoPortDuplicateComment(line) abort
     return repeat(' ', max([0, g:atv_autoport_st_pos])) . '// AUTOPORT_DUPLICATE: ' . l:code
 endfunction
 
-function! s:AutoPortHasLaterRegionPorts(boundary, header_close, conflicts, duplicates, body_start, body_end) abort
+function! s:AutoPortUnusedComment(line, detail) abort
+    let l:code = s:StripComments([a:line])[0]
+    let l:code = substitute(l:code, '^\s*', '', '')
+    let l:code = substitute(l:code, '\s*$', '', '')
+    let l:code = substitute(l:code, ',\s*$', '', '')
+    if empty(l:code)
+        return ''
+    endif
+
+    let l:line_comment_pos = match(a:line, '//')
+    let l:block_pos = match(a:line, '/\*')
+    if l:block_pos >= 0 && l:line_comment_pos >= 0 && l:line_comment_pos < l:block_pos
+        " A block-comment token inside a // comment is only text.
+        let l:block_pos = -1
+    endif
+    let l:comment_pos = l:line_comment_pos
+    if l:block_pos >= 0 && (l:comment_pos < 0 || l:block_pos < l:comment_pos)
+        let l:comment_pos = l:block_pos
+    endif
+    let l:comment = l:comment_pos >= 0 ? ' ' . strpart(a:line, l:comment_pos) : ''
+    if l:block_pos >= 0 && match(a:line, '\*/', l:block_pos + 2) < 0
+        " The block continues on following source lines; it is emitted as a
+        " separate block comment by AutoPortUnusedCommentLines().
+        let l:comment = ''
+    endif
+    return repeat(' ', max([0, g:atv_autoport_st_pos]))
+                \ . '// AUTOPORT_UNUSED: ' . l:code . a:detail . l:comment
+endfunction
+
+function! s:AutoPortUnusedCommentLines(line, detail) abort
+    let l:out = [s:AutoPortUnusedComment(a:line, a:detail)]
+    let l:line_comment_pos = match(a:line, '//')
+    let l:block_pos = match(a:line, '/\*')
+    if l:block_pos >= 0 && l:line_comment_pos >= 0 && l:line_comment_pos < l:block_pos
+        let l:block_pos = -1
+    endif
+    if l:block_pos >= 0 && match(a:line, '\*/', l:block_pos + 2) < 0
+        call add(l:out, repeat(' ', max([0, g:atv_autoport_st_pos]))
+                    \ . strpart(a:line, l:block_pos))
+    endif
+    return filter(l:out, '!empty(v:val)')
+endfunction
+
+function! s:AutoPortBuildSignalUsageIndex(body_start, body_end, header_before, ...) abort
+    " Build all signal-usage information in one parent-module pass.
+    " The previous implementation rescanned and retokenized the full module
+    " once per candidate port, making large AUTOPORT blocks unnecessarily slow.
+    let l:index = {
+                \ 'identifier_counts': {},
+                \ 'declared_counts': {},
+                \ 'formal_pin_counts': {},
+                \ 'header_ports': {}
+                \ }
+
+    " A hand-written module-header port is an external connection and must
+    " prevent AUTOPORT_UNUSED, even without another textual body reference.
+    for l:line in a:header_before
+        let l:name = s:PortNameFromLine(l:line)
+        if !empty(l:name)
+            let l:index.header_ports[l:name] = 1
+        endif
+    endfor
+
+    if a:body_start > a:body_end
+        return l:index
+    endif
+
+    let l:raw_lines = a:0 >= 2 ? a:2 : getline(a:body_start, a:body_end)
+    let l:text = a:0 >= 1 ? a:1 : s:AutoPortGetCodeText(l:raw_lines)
+
+    " Count every code identifier once. Comments and strings have already
+    " been blanked by AutoPortGetCodeText(), while line structure is retained.
+    let l:pos = 0
+    while 1
+        let l:found = match(l:text, '\h\w*', l:pos)
+        if l:found < 0
+            break
+        endif
+        let l:name = matchstr(l:text, '\h\w*', l:pos)
+        let l:index.identifier_counts[l:name] =
+                    \ get(l:index.identifier_counts, l:name, 0) + 1
+        let l:end = matchend(l:text, '\h\w*', l:pos)
+        if l:end <= l:pos
+            break
+        endif
+        let l:pos = l:end
+    endwhile
+
+    " Declarations are not uses by themselves. Reuse the per-line counts
+    " already collected during conflict analysis when the caller supplies them.
+    if a:0 >= 3
+        let l:index.declared_counts = copy(a:3)
+    else
+        for l:line in l:raw_lines
+            for l:name in s:DeclaredNamesFromLine(l:line)
+                let l:index.declared_counts[l:name] =
+                            \ get(l:index.declared_counts, l:name, 0) + 1
+            endfor
+        endfor
+    endif
+
+    " In `.formal(actual)`, the formal pin label is not a parent signal use.
+    " Count formal labels once so a query for any candidate is O(1).
+    let l:formal_pat = '\.\_s*\zs\h\w*\ze\_s*('
+    let l:pos = 0
+    while 1
+        let l:found = match(l:text, l:formal_pat, l:pos)
+        if l:found < 0
+            break
+        endif
+        let l:name = matchstr(l:text, l:formal_pat, l:pos)
+        let l:index.formal_pin_counts[l:name] =
+                    \ get(l:index.formal_pin_counts, l:name, 0) + 1
+        let l:end = matchend(l:text, l:formal_pat, l:pos)
+        if l:end <= l:pos
+            break
+        endif
+        let l:pos = l:end
+    endwhile
+
+    return l:index
+endfunction
+
+function! s:AutoPortSignalHasOtherUse(index, signal, connection_refs) abort
+    " Look up the precomputed index. The target-instance signal occurrence
+    " and all formal `.pin(...)` labels are excluded; declarations alone are
+    " not uses. Any remaining identifier occurrence counts as another use,
+    " including both sides of assign, all references in always blocks, and
+    " actual connections to other module ports.
+    if a:signal !~# '^\h\w*$'
+        return 1
+    endif
+
+    if has_key(a:index.header_ports, a:signal)
+        return 1
+    endif
+
+    let l:uses = get(a:index.identifier_counts, a:signal, 0)
+                \ - get(a:index.declared_counts, a:signal, 0)
+                \ - a:connection_refs
+                \ - get(a:index.formal_pin_counts, a:signal, 0)
+    return l:uses > 0
+endfunction
+
+function! s:AutoPortHasLaterRegionPorts(boundary, header_close, conflicts, duplicates, body_start, body_end, ...) abort
     if a:boundary.kind !=# 'marker'
         return 0
     endif
@@ -1373,13 +1716,23 @@ function! s:AutoPortHasLaterRegionPorts(boundary, header_close, conflicts, dupli
                     let l:src_body = s:GetModulePortBody(readfile(l:source_file), l:module)
                     if !empty(l:src_body)
                         let l:clean_src = s:StripComments(l:src_body)
-                        let l:mismatches = s:GetMismatchedConnections(l:module, a:body_start, a:body_end)
+                        let l:connections = a:0 >= 1
+                                    \ ? s:GetInstancePortConnections(l:module, a:body_start, a:body_end, a:1)
+                                    \ : s:GetInstancePortConnections(l:module, a:body_start, a:body_end)
+                        let l:mismatches = {}
+                        for l:name in keys(l:connections.ports)
+                            if l:connections.ports[l:name].kind !=# 'match'
+                                let l:mismatches[l:name] = 1
+                            endif
+                        endfor
                         for l:src_line in l:clean_src
                             let l:pname = s:PortNameFromLine(l:src_line)
                             if !empty(l:pname)
                                         \ && !has_key(a:conflicts, l:pname)
                                         \ && !has_key(a:duplicates, l:pname)
                                         \ && !has_key(l:mismatches, l:pname)
+                                        \ && !(l:connections.recognized && !l:connections.wildcard
+                                        \       && !has_key(l:connections.ports, l:pname))
                                 return 1
                             endif
                         endfor
