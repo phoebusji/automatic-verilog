@@ -101,7 +101,9 @@ function! g:AutoPort(mode) abort
         if getline('.') !~ '^\s*//'
             call add(l:markers, line('.'))
         endif
-        call cursor(line('.') + 1, 1)
+        " Move to end of this line. Starting at column 1 of the next line
+        " would make search() skip an AUTOPORT marker at that column.
+        call cursor(line('.'), col('$'))
     endwhile
     for l:lnum in reverse(l:markers)
         call s:AutoPortAt(l:lnum)
@@ -151,7 +153,9 @@ function! g:KillAutoPort(mode) abort
         if getline('.') !~ '^\s*//'
             call add(l:markers, line('.'))
         endif
-        call cursor(line('.') + 1, 1)
+        " Move to end of this line. Starting at column 1 of the next line
+        " would make search() skip an AUTOPORT marker at that column.
+        call cursor(line('.'), col('$'))
     endwhile
     for l:lnum in reverse(l:markers)
         call s:KillAutoPortAt(l:lnum)
